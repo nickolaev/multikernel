@@ -1,7 +1,16 @@
 #!/bin/sh
 
 PATH=/bin:/sbin
+PYTHONHOME=/usr
+PYTHONPATH=/usr/lib/python3/dist-packages
+PYTHONDONTWRITEBYTECODE=1
 export PATH
+export PYTHONHOME PYTHONPATH PYTHONDONTWRITEBYTECODE
+
+kerf()
+{
+	/usr/bin/python3 -m kerf.cli "$@"
+}
 
 fail()
 {
@@ -36,24 +45,26 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 grep -q 'Multikernel Memory Pool' /proc/iomem || fail pool-reservation
 printf 'MK_STAGE_POOL_OK size=512M base=0x40000000\n'
 
-mkdir -p /sys/fs/multikernel
-mount -t multikernel none /sys/fs/multikernel || fail mount-multikernel
-printf 'MK_STAGE_MOUNT_OK path=/sys/fs/multikernel\n'
-
-cat /assets/baseline.dtb >/sys/fs/multikernel/device_tree || fail initialize-baseline
-printf 'MK_STAGE_BASELINE_OK cpu=2 memory=512M\n'
-cat /assets/instance.dtbo >/sys/fs/multikernel/overlays/new || fail create-instance
+kerf init --input=/assets/baseline.dts || fail kerf-init
+printf 'MK_STAGE_KERF_INIT_OK cpu=2 memory=512M\n'
+kerf create qemu-demo --id=1 --cpus=2 --memory=256MB \
+	--memory-base=0x40000000 || fail kerf-create
+printf 'MK_STAGE_KERF_CREATE_OK id=1\n'
 expect_status ready || fail status-ready
 
-/bin/mkctl load 1 /payload/vmlinux /payload/secondary-initrd.cpio.gz \
-	'console=mktty0 rdinit=/init quiet loglevel=4 panic=-1 kho=on' || fail load
+kerf load qemu-demo --kernel=/payload/vmlinux \
+	--initrd=/payload/secondary-initrd.cpio.gz \
+	--cmdline='rdinit=/init quiet loglevel=4 panic=-1 kho=on' \
+	--console=mktty0 || fail kerf-load
+printf 'MK_STAGE_KERF_LOAD_OK id=1\n'
 expect_status loaded || fail status-loaded
 
 exec 3<>/dev/mktty || fail mktty-open
 printf '1\n' >&3 || fail mktty-select
 printf 'MK_STAGE_MKTTY_CONNECTED id=1\n'
 
-/bin/mkctl exec 1 || fail exec
+kerf exec qemu-demo || fail kerf-exec
+printf 'MK_STAGE_KERF_EXEC_OK id=1\n'
 expect_status active || fail status-active
 
 if ! timeout 90 sh -c '
@@ -69,7 +80,8 @@ if ! timeout 90 sh -c '
 fi
 
 printf 'MK_PRIMARY_STILL_ALIVE instance=0 after=MK_SECONDARY_ALIVE\n'
-/bin/mkctl halt 1 || fail halt-secondary
+kerf kill qemu-demo || fail kerf-kill
+printf 'MK_STAGE_KERF_KILL_OK id=1\n'
 printf 'MK_DEMO_PASS simultaneous_kernels=verified\n'
 sync
 poweroff -f

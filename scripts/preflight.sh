@@ -8,6 +8,7 @@ die() {
 
 [[ -d "${LINUX_DIR}/.git" ]] || die "${LINUX_DIR} is not a Linux Git tree"
 [[ -f "${LINUX_DIR}/kernel/multikernel/Kconfig" ]] || die "Multikernel sources are missing"
+[[ -f "${KERF_DIR}/src/kerf/cli.py" ]] || die "${KERF_DIR} is not a Kerf source tree"
 
 branch=$(git -C "${LINUX_DIR}" branch --show-current)
 if [[ "${branch}" != mk-master && "${ALLOW_OTHER_BRANCH:-0}" != 1 ]]; then
@@ -16,9 +17,9 @@ fi
 
 for item in \
 	"BUSYBOX:${BUSYBOX}" \
-	"DTC:${DTC}" \
 	"QEMU:${QEMU}" \
 	"CC:${CC}" \
+	"PYTHON:${PYTHON}" \
 	"FLEX:${LEX}" \
 	"BISON:${YACC}" \
 	"CPIO:cpio" \
@@ -28,6 +29,8 @@ for item in \
 	[[ -n "${value}" ]] || die "required tool ${name} was not found"
 	command -v "${value}" >/dev/null 2>&1 || die "required tool ${name} is not executable: ${value}"
 done
+
+"${PYTHON}" -m pip --version >/dev/null 2>&1 || die "required Python module pip was not found"
 
 file "${BUSYBOX}" | grep -q 'statically linked' || die "BusyBox must be statically linked"
 if [[ ! -f /usr/include/gelf.h ]]; then
@@ -42,5 +45,5 @@ done
 (( ${QEMU_MEMORY_MB:-2048} >= 1536 )) || die "QEMU_MEMORY_MB must be at least 1536 for the fixed pool"
 (( ${QEMU_TIMEOUT:-180} >= 30 )) || die "QEMU_TIMEOUT must be at least 30 seconds"
 
-printf 'MK_PREFLIGHT_OK branch=%s cc=%s flex=%s bison=%s busybox=%s qemu=%s\n' \
-	"${branch}" "${CC}" "${LEX}" "${YACC}" "${BUSYBOX}" "${QEMU}"
+printf 'MK_PREFLIGHT_OK branch=%s cc=%s flex=%s bison=%s python=%s busybox=%s qemu=%s\n' \
+	"${branch}" "${CC}" "${LEX}" "${YACC}" "${PYTHON}" "${BUSYBOX}" "${QEMU}"

@@ -24,18 +24,16 @@ for applet in sh mount mkdir cat grep sleep poweroff timeout sync; do
 done
 
 if [[ "${mode}" == host ]]; then
-	[[ $# -eq 9 ]] || { printf 'host mode requires MKCTL SECONDARY_KERNEL SECONDARY_INITRD BASELINE_DTB INSTANCE_DTBO\n' >&2; exit 1; }
-	mkctl=$5
+	[[ $# -eq 8 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD BASELINE_DTS\n' >&2; exit 1; }
+	kerf_runtime=$5
 	kernel=$6
 	secondary_initrd=$7
-	baseline_dtb=$8
-	instance_dtbo=$9
+	baseline_dts=$8
 	mkdir -p "${root}/assets" "${root}/payload"
-	install -m 0755 "${mkctl}" "${root}/bin/mkctl"
+	cp -a "${kerf_runtime}/." "${root}/"
 	install -m 0644 "${kernel}" "${root}/payload/vmlinux"
 	install -m 0644 "${secondary_initrd}" "${root}/payload/secondary-initrd.cpio.gz"
-	install -m 0644 "${baseline_dtb}" "${root}/assets/baseline.dtb"
-	install -m 0644 "${instance_dtbo}" "${root}/assets/instance.dtbo"
+	install -m 0644 "${baseline_dts}" "${root}/assets/baseline.dts"
 elif [[ "${mode}" != secondary ]]; then
 	printf 'unknown initramfs mode: %s\n' "${mode}" >&2
 	exit 1
