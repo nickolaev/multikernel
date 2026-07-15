@@ -1,0 +1,6 @@
+[submodule "linux"]
+	path = linux
+	url = https://github.com/multikernel/linux.git
+[submodule "kerf"]
+	path = kerf
+	url = https://github.com/multikernel/kerf.git

@@ -1,0 +1,10 @@
+/dts-v1/;
+
+/ {
+	compatible = "multikernel-v1";
+	resources {
+		cpus = <2>;
+		memory-base = /bits/ 64 <0x40000000>;
+		memory-bytes = /bits/ 64 <0x20000000>;
+	};
+};

@@ -1,0 +1,76 @@
+#!/bin/sh
+
+PATH=/bin:/sbin
+export PATH
+
+fail()
+{
+	printf 'MK_DEMO_FAIL stage=%s\n' "$1"
+	sync
+	poweroff -f
+	while :; do sleep 1; done
+}
+
+expect_status()
+{
+	expected=$1
+	status_file=/sys/fs/multikernel/instances/qemu-demo/status
+	attempt=0
+	while [ "$attempt" -lt 50 ]; do
+		actual=$(cat "$status_file" 2>/dev/null || true)
+		if [ "$actual" = "$expected" ]; then
+			printf 'MK_STAGE_STATUS_%s id=1\n' "$expected"
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		sleep 1
+	done
+	printf 'MK_STATUS_MISMATCH expected=%s actual=%s\n' "$expected" "$actual"
+	return 1
+}
+
+mount -t proc proc /proc || fail mount-proc
+mount -t sysfs sysfs /sys || fail mount-sysfs
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+grep -q 'Multikernel Memory Pool' /proc/iomem || fail pool-reservation
+printf 'MK_STAGE_POOL_OK size=512M base=0x40000000\n'
+
+mkdir -p /sys/fs/multikernel
+mount -t multikernel none /sys/fs/multikernel || fail mount-multikernel
+printf 'MK_STAGE_MOUNT_OK path=/sys/fs/multikernel\n'
+
+cat /assets/baseline.dtb >/sys/fs/multikernel/device_tree || fail initialize-baseline
+printf 'MK_STAGE_BASELINE_OK cpu=2 memory=512M\n'
+cat /assets/instance.dtbo >/sys/fs/multikernel/overlays/new || fail create-instance
+expect_status ready || fail status-ready
+
+/bin/mkctl load 1 /payload/vmlinux /payload/secondary-initrd.cpio.gz \
+	'console=mktty0 rdinit=/init quiet loglevel=4 panic=-1 kho=on' || fail load
+expect_status loaded || fail status-loaded
+
+exec 3<>/dev/mktty || fail mktty-open
+printf '1\n' >&3 || fail mktty-select
+printf 'MK_STAGE_MKTTY_CONNECTED id=1\n'
+
+/bin/mkctl exec 1 || fail exec
+expect_status active || fail status-active
+
+if ! timeout 90 sh -c '
+	while IFS= read -r line; do
+		printf "MK_SECONDARY_STREAM:%s\n" "$line"
+		case "$line" in
+			*MK_SECONDARY_ALIVE*) exit 0 ;;
+		esac
+	done <&3
+	exit 1
+'; then
+	fail secondary-marker
+fi
+
+printf 'MK_PRIMARY_STILL_ALIVE instance=0 after=MK_SECONDARY_ALIVE\n'
+/bin/mkctl halt 1 || fail halt-secondary
+printf 'MK_DEMO_PASS simultaneous_kernels=verified\n'
+sync
+poweroff -f
+while :; do sleep 1; done
