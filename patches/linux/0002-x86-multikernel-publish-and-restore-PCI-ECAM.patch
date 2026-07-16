@@ -1,0 +1,215 @@
+From 4e242978c5f2b282134f65a68683d1a7c0f96df8 Mon Sep 17 00:00:00 2001
+From: Nikolay Nikolaev <nicknickolaev@gmail.com>
+Date: Thu, 16 Jul 2026 08:46:07 +0300
+Subject: [PATCH 2/4] x86/multikernel: publish and restore PCI ECAM
+
+---
+ arch/x86/include/asm/pci_x86.h |  11 ++++
+ arch/x86/pci/init.c            |  24 ++++++--
+ arch/x86/pci/mmconfig-shared.c | 108 +++++++++++++++++++++++++++++++++
+ 3 files changed, 138 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/include/asm/pci_x86.h b/arch/x86/include/asm/pci_x86.h
+index 70533fdcbf02..79b09ad76bbe 100644
+--- a/arch/x86/include/asm/pci_x86.h
++++ b/arch/x86/include/asm/pci_x86.h
+@@ -179,6 +179,11 @@ struct pci_mmcfg_region {
+ 
+ extern int __init pci_mmcfg_arch_init(void);
+ extern void __init pci_mmcfg_arch_free(void);
++#ifdef CONFIG_PCI_MMCONFIG
++int __init pci_mmcfg_multikernel_init(void);
++#else
++static inline int pci_mmcfg_multikernel_init(void) { return -ENODEV; }
++#endif
+ extern int pci_mmcfg_arch_map(struct pci_mmcfg_region *cfg);
+ extern void pci_mmcfg_arch_unmap(struct pci_mmcfg_region *cfg);
+ extern int pci_mmconfig_insert(struct device *dev, u16 seg, u8 start, u8 end,
+@@ -190,6 +195,12 @@ extern struct pci_mmcfg_region *__init pci_mmconfig_add(int segment, int start,
+ 
+ extern struct list_head pci_mmcfg_list;
+ 
++struct mk_instance;
++struct mk_pci_host_bridge;
++int mk_arch_snapshot_pci_host_bridges(const struct mk_instance *instance,
++				      struct mk_pci_host_bridge *bridges,
++				      size_t capacity);
++
+ #define PCI_MMCFG_BUS_OFFSET(bus)      ((bus) << 20)
+ 
+ /*
+diff --git a/arch/x86/pci/init.c b/arch/x86/pci/init.c
+index 0bb3b8b44e4e..5331112e22a8 100644
+--- a/arch/x86/pci/init.c
++++ b/arch/x86/pci/init.c
+@@ -4,17 +4,30 @@
+ #include <asm/pci_x86.h>
+ #include <asm/x86_init.h>
+ #include <asm/irqdomain.h>
++#include <asm/setup.h>
+ 
+ /* arch_initcall has too random ordering, so call the initializers
+    in the right sequence from here. */
+ static __init int pci_arch_init(void)
+ {
+-	int type, pcbios = 1;
++	bool multikernel =
++		boot_params.hdr.hardware_subarch == X86_SUBARCH_MULTIKERNEL;
++	int type = 0, pcbios = 1, ret;
+ 
+-	type = pci_direct_probe();
++	if (multikernel) {
++		ret = pci_mmcfg_multikernel_init();
++		if (ret) {
++			pr_err("PCI: Multikernel ECAM initialization failed: %d\n", ret);
++			return ret;
++		}
++		/* ACPI is unavailable in a spawned kernel; scan the restored root. */
++		x86_init.pci.init = pci_legacy_init;
++	} else {
++		type = pci_direct_probe();
+ 
+-	if (!(pci_probe & PCI_PROBE_NOEARLY))
+-		pci_mmcfg_early_init();
++		if (!(pci_probe & PCI_PROBE_NOEARLY))
++			pci_mmcfg_early_init();
++	}
+ 
+ 	if (x86_init.pci.arch_init)
+ 		pcbios = x86_init.pci.arch_init();
+@@ -36,7 +49,8 @@ static __init int pci_arch_init(void)
+ 	 * in case legacy PCI probing is used. otherwise detecting peer busses
+ 	 * fails.
+ 	 */
+-	pci_direct_init(type);
++	if (!multikernel)
++		pci_direct_init(type);
+ 
+ 	if (!raw_pci_ops && !raw_pci_ext_ops)
+ 		printk(KERN_ERR
+diff --git a/arch/x86/pci/mmconfig-shared.c b/arch/x86/pci/mmconfig-shared.c
+index 1f4522325920..ab674d6b9626 100644
+--- a/arch/x86/pci/mmconfig-shared.c
++++ b/arch/x86/pci/mmconfig-shared.c
+@@ -22,6 +22,7 @@
+ #include <linux/slab.h>
+ #include <linux/mutex.h>
+ #include <linux/rculist.h>
++#include <linux/multikernel.h>
+ #include <asm/acpi.h>
+ #include <asm/e820/api.h>
+ #include <asm/msr.h>
+@@ -35,6 +36,113 @@ static DEFINE_MUTEX(pci_mmcfg_lock);
+ 
+ LIST_HEAD(pci_mmcfg_list);
+ 
++int __init pci_mmcfg_multikernel_init(void)
++{
++	const struct mk_pci_host_bridge *bridge;
++	const struct mk_pci_device *device;
++	u32 class_revision = ~0U;
++	u32 value = ~0U;
++	int ret;
++
++	if (!root_instance || !root_instance->pci_host_bridges_valid ||
++	    !root_instance->pci_host_bridge_count) {
++		pr_err("Multikernel has no restored PCI host bridge metadata\n");
++		return -ENODEV;
++	}
++	if (!list_empty(&pci_mmcfg_list)) {
++		pr_err("Multikernel PCI host bridge list was not empty before restore\n");
++		return -EBUSY;
++	}
++
++	list_for_each_entry(bridge, &root_instance->pci_host_bridges, list) {
++		if (!pci_mmconfig_add(bridge->segment, bridge->bus_start,
++				      bridge->bus_end, bridge->ecam_base))
++			return -ENOMEM;
++		pr_notice("Multikernel restored ECAM segment %04x [bus %02x-%02x] base %#llx\n",
++			  bridge->segment, bridge->bus_start, bridge->bus_end,
++			  (unsigned long long)bridge->ecam_base);
++	}
++	if (!pci_mmcfg_arch_init())
++		return -EIO;
++
++	raw_pci_ops = &pci_mmcfg;
++	raw_pci_ext_ops = &pci_mmcfg;
++	pci_probe = (pci_probe & ~PCI_PROBE_MASK) | PCI_PROBE_MMCONF;
++	pr_notice("Multikernel selected ECAM for base and extended PCI config access\n");
++
++	if (!root_instance->pci_devices_valid ||
++	    !root_instance->pci_device_count)
++		return -ENODEV;
++	device = list_first_entry(&root_instance->pci_devices,
++				  struct mk_pci_device, list);
++	ret = pci_mmcfg.read(device->domain, device->bus,
++		PCI_DEVFN(device->slot, device->func), PCI_VENDOR_ID,
++		sizeof(value), &value);
++	pr_notice("MK_SECONDARY_ECAM_CONFIG_READ bdf=%04x:%02x:%02x.%x value=%#010x\n",
++		  device->domain, device->bus, device->slot, device->func, value);
++	if (ret) {
++		pr_err("Multikernel assigned PCI device identity read failed: %d\n", ret);
++		return -EIO;
++	}
++
++	ret = pci_mmcfg.read(device->domain, device->bus,
++		PCI_DEVFN(device->slot, device->func), PCI_CLASS_REVISION,
++		sizeof(class_revision), &class_revision);
++	pr_notice("MK_SECONDARY_ECAM_CLASS_READ bdf=%04x:%02x:%02x.%x value=%#010x\n",
++		  device->domain, device->bus, device->slot, device->func,
++		  class_revision);
++	if (ret || (class_revision >> 8) == 0xffffff) {
++		pr_err("Multikernel assigned PCI device class read failed: ret=%d value=%#010x\n",
++		       ret, class_revision);
++		return -EIO;
++	}
++
++	return 0;
++}
++int mk_arch_snapshot_pci_host_bridges(const struct mk_instance *instance,
++				      struct mk_pci_host_bridge *bridges,
++				      size_t capacity)
++{
++	const struct mk_pci_device *device;
++	const struct pci_mmcfg_region *cfg;
++	size_t count = 0;
++
++	if (!instance || !bridges || !capacity ||
++	    !instance->pci_devices_valid || !instance->pci_device_count)
++		return 0;
++
++	mutex_lock(&pci_mmcfg_lock);
++	list_for_each_entry(cfg, &pci_mmcfg_list, list) {
++		bool contains_device = false;
++
++		list_for_each_entry(device, &instance->pci_devices, list) {
++			if (device->domain == cfg->segment &&
++			    device->bus >= cfg->start_bus &&
++			    device->bus <= cfg->end_bus) {
++				contains_device = true;
++				break;
++			}
++		}
++		if (!contains_device)
++			continue;
++		if (count == capacity) {
++			mutex_unlock(&pci_mmcfg_lock);
++			return -ENOSPC;
++		}
++		bridges[count].segment = cfg->segment;
++		bridges[count].bus_start = cfg->start_bus;
++		bridges[count].bus_end = cfg->end_bus;
++		bridges[count].ecam_base = cfg->address;
++		pr_info("Multikernel publishing ECAM segment %04x [bus %02x-%02x] base %#llx\n",
++			cfg->segment, cfg->start_bus, cfg->end_bus,
++			(unsigned long long)cfg->address);
++		count++;
++	}
++	mutex_unlock(&pci_mmcfg_lock);
++
++	return count;
++}
++
+ static void __init pci_mmconfig_remove(struct pci_mmcfg_region *cfg)
+ {
+ 	if (cfg->res.parent)

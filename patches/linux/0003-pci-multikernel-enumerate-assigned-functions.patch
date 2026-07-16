@@ -1,0 +1,51 @@
+From 99f30a6a477e81999a70b75867cb1b793d674708 Mon Sep 17 00:00:00 2001
+From: Nikolay Nikolaev <nicknickolaev@gmail.com>
+Date: Thu, 16 Jul 2026 08:46:49 +0300
+Subject: [PATCH 3/4] pci/multikernel: enumerate assigned functions
+
+---
+ drivers/pci/probe.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pci/probe.c b/drivers/pci/probe.c
+index eed1f98d556f..1b2261210745 100644
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -2623,6 +2623,7 @@ static struct platform_device *pci_pwrctrl_create_device(struct pci_bus *bus, in
+ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
+ {
+ 	struct pci_dev *dev;
++	u16 vendor, device;
+ 	u32 l;
+ 
+ 	/*
+@@ -2642,8 +2643,17 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
+ 	if (pci_pwrctrl_create_device(bus, devfn))
+ 		return NULL;
+ 
+-	if (!pci_bus_read_dev_vendor_id(bus, devfn, &l, 60*1000))
+-		return NULL;
++	if (!pci_bus_read_dev_vendor_id(bus, devfn, &l, 60*1000)) {
++		/*
++		 * SR-IOV r1.1 sec 3.4.1 requires raw VF Vendor and Device ID
++		 * reads to return FFFFh. The virtualization intermediary presents
++		 * the PF Vendor ID and VF Device ID to the system image instead.
++		 */
++		if (!IS_ENABLED(CONFIG_MULTIKERNEL) ||
++		    !mk_pci_get_assigned_identity(bus, devfn, &vendor, &device))
++			return NULL;
++		l = vendor | (u32)device << 16;
++	}
+ 
+ 	dev = pci_alloc_dev(bus);
+ 	if (!dev)
+@@ -2659,6 +2669,9 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
+ 		return NULL;
+ 	}
+ 
++	if (IS_ENABLED(CONFIG_MULTIKERNEL))
++		mk_pci_restore_resources(dev);
++
+ 	return dev;
+ }
+ 
