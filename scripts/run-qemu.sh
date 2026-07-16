@@ -31,6 +31,8 @@ args=(
 	-nographic
 	-monitor none
 	-no-reboot
+	-netdev user,id=net0
+	-device igb,netdev=net0
 )
 
 if [[ "${mode}" == run ]]; then
@@ -55,18 +57,35 @@ if (( qemu_status != 0 )); then
 fi
 
 markers=(
+	'contains BAR 0 for 8 VFs'
+	'Intel(R) Gigabit Ethernet Network Connection'
 	'MK_STAGE_POOL_OK'
+	'MK_STAGE_VF_CREATED'
+	'MK_STAGE_PF_RETAINED'
 	'MK_STAGE_KERF_INIT_OK'
 	'MK_STAGE_KERF_CREATE_OK'
 	'MK_STAGE_STATUS_ready'
+	'MK_STAGE_VF_ASSIGNED'
 	'MK_STAGE_KERF_LOAD_OK'
 	'MK_STAGE_STATUS_loaded'
 	'MK_STAGE_MKTTY_CONNECTED'
 	'MK_STAGE_KERF_EXEC_OK'
 	'MK_STAGE_STATUS_active'
+	'MK_STAGE_PF_LINK_UP pf=0000:00:02.0'
+	'MK_SECONDARY_ECAM_CONFIG_READ bdf=0000:00:12.0 value=0xffffffff'
+	'MK_SECONDARY_ECAM_CLASS_READ bdf=0000:00:12.0 value='
+	'MK_SECONDARY_ASSIGNED_PCI_IDENTITY bdf=0000:00:12.0 vendor=8086 device=10ca'
+	'MK_SECONDARY_VF_ENUMERATED instance=1 bdf=0000:00:12.0 vendor=0x8086 device=0x10ca'
+	'MK_SECONDARY_VF_BAR index=0'
+	'MK_SECONDARY_PF_ABSENT instance=1 bdf=0000:00:02.0'
+	'MK_SECONDARY_VF_READY instance=1 bdf=0000:00:12.0 driver=igbvf netdev='
+	'MK_SECONDARY_VF_TRAFFIC_BEFORE netdev='
+	'MK_SECONDARY_VF_DATAPATH netdev='
 	'MK_SECONDARY_ALIVE'
 	'MK_PRIMARY_STILL_ALIVE'
+	'MK_STAGE_PF_ACTIVE pf=0000:00:02.0 driver=igb'
 	'MK_STAGE_KERF_KILL_OK'
+	'MK_STAGE_VF_TEARDOWN pf=0000:00:02.0 vfs=0'
 	'MK_DEMO_PASS simultaneous_kernels=verified'
 )
 

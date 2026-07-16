@@ -45,16 +45,67 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 grep -q 'Multikernel Memory Pool' /proc/iomem || fail pool-reservation
 printf 'MK_STAGE_POOL_OK size=512M base=0x40000000\n'
 
-kerf init --input=/assets/baseline.dts || fail kerf-init
+pf_bdf=0000:00:02.0
+pf_path=/sys/bus/pci/devices/$pf_bdf
+pf_netdev=
+for net_path in "$pf_path"/net/*; do
+	[ -e "$net_path" ] || continue
+	pf_netdev=${net_path##*/}
+	break
+done
+[ -n "$pf_netdev" ] || fail pf-netdev
+/bin/busybox ip link set "$pf_netdev" up || fail pf-link-up
+printf 'MK_STAGE_PF_LINK_UP pf=%s netdev=%s\n' "$pf_bdf" "$pf_netdev"
+sleep 2
+[ -e "$pf_path/sriov_numvfs" ] || fail vf-missing-sriov
+printf '1\n' >"$pf_path/sriov_numvfs" || fail vf-enable
+
+attempt=0
+vf_path=
+while [ "$attempt" -lt 50 ]; do
+	vf_path=$(/bin/busybox readlink -f "$pf_path/virtfn0" 2>/dev/null || true)
+	[ -n "$vf_path" ] && [ -e "$vf_path/vendor" ] && break
+	attempt=$((attempt + 1))
+	sleep 1
+done
+[ -n "$vf_path" ] && [ -e "$vf_path/vendor" ] || fail vf-discovery
+
+vf_bdf=${vf_path##*/}
+vf_vendor=$(cat "$vf_path/vendor")
+vf_device=$(cat "$vf_path/device")
+vf_vendor=${vf_vendor#0x}
+vf_device=${vf_device#0x}
+/bin/busybox sed \
+	-e "s/@VF_BDF@/$vf_bdf/g" \
+	-e "s/@VF_VENDOR@/$vf_vendor/g" \
+	-e "s/@VF_DEVICE@/$vf_device/g" \
+	/assets/baseline.dts > /run/baseline.dts || fail vf-baseline
+printf 'MK_STAGE_VF_CREATED pf=%s vf=%s vendor=%s device=%s\n' \
+	"$pf_bdf" "$vf_bdf" "$vf_vendor" "$vf_device"
+
+kerf init --input=/run/baseline.dts || fail kerf-init
+[ ! -e "$vf_path/driver" ] || fail vf-still-bound-to-primary
+pf_driver=$(/bin/busybox readlink "$pf_path/driver" 2>/dev/null || true)
+case "$pf_driver" in
+	*/igb) ;;
+	*) fail pf-not-retained-by-primary ;;
+esac
+printf 'MK_STAGE_PF_RETAINED pf=%s driver=igb\n' "$pf_bdf"
 printf 'MK_STAGE_KERF_INIT_OK cpu=2 memory=512M\n'
 kerf create qemu-demo --id=1 --cpus=2 --memory=256MB \
-	--memory-base=0x40000000 || fail kerf-create
+	--memory-base=0x40000000 --devices=igbvf0 || fail kerf-create
 printf 'MK_STAGE_KERF_CREATE_OK id=1\n'
 expect_status ready || fail status-ready
+grep -q 'pci-host-bridges' /sys/fs/multikernel/instances/qemu-demo/device_tree \
+	|| fail pci-host-bridge-instance-dtb
+printf 'MK_STAGE_PCI_HOST_BRIDGE_METADATA id=1 segment=0000 buses=00-ff ecam=0xb0000000\n'
+grep -q "$vf_bdf" /sys/fs/multikernel/instances/qemu-demo/device_tree \
+	|| fail vf-instance-dtb
+printf 'MK_STAGE_VF_ASSIGNED id=1 vf=%s resource=igbvf0\n' "$vf_bdf"
 
 kerf load qemu-demo --kernel=/payload/vmlinux \
 	--initrd=/payload/secondary-initrd.cpio.gz \
-	--cmdline='rdinit=/init quiet loglevel=4 panic=-1 kho=on' \
+	--cmdline="rdinit=/init quiet loglevel=6 panic=-1 kho=on mk_vf_bdf=$vf_bdf" \
 	--console=mktty0 || fail kerf-load
 printf 'MK_STAGE_KERF_LOAD_OK id=1\n'
 expect_status loaded || fail status-loaded
@@ -80,8 +131,18 @@ if ! timeout 90 sh -c '
 fi
 
 printf 'MK_PRIMARY_STILL_ALIVE instance=0 after=MK_SECONDARY_ALIVE\n'
+pf_driver=$(/bin/busybox readlink "$pf_path/driver" 2>/dev/null || true)
+case "$pf_driver" in
+	*/igb) ;;
+	*) fail pf-driver-lost ;;
+esac
+[ "$(cat "$pf_path/sriov_numvfs")" = 1 ] || fail vf-count-changed
+/bin/busybox ip link show "$pf_netdev" | grep -q 'UP' || fail pf-link-lost
+printf 'MK_STAGE_PF_ACTIVE pf=%s driver=igb netdev=%s vfs=1\n' "$pf_bdf" "$pf_netdev"
 kerf kill qemu-demo || fail kerf-kill
 printf 'MK_STAGE_KERF_KILL_OK id=1\n'
+printf '0\n' >"$pf_path/sriov_numvfs" || fail vf-teardown
+printf 'MK_STAGE_VF_TEARDOWN pf=%s vfs=0\n' "$pf_bdf"
 printf 'MK_DEMO_PASS simultaneous_kernels=verified\n'
 sync
 poweroff -f
