@@ -7,6 +7,7 @@ BUILD_DIR ?= $(ROOT)/build
 KBUILD_DIR := $(BUILD_DIR)/kernel
 HOST_DEPS := $(BUILD_DIR)/host-deps/root
 KERF_RUNTIME := $(BUILD_DIR)/kerf-runtime
+KERF_PYTHON_SOURCES := $(shell find '$(KERF_DIR)/src/kerf' -type f -name '*.py')
 JOBS ?= $(shell nproc)
 CC ?= cc
 PYTHON ?= $(shell command -v python3 2>/dev/null)
@@ -20,7 +21,7 @@ SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
 
-.PHONY: all preflight config kernel kerf-runtime initrd build run test clean help
+.PHONY: all preflight config kernel kerf-runtime initrd build run test clean help FORCE
 
 all: build
 
@@ -51,7 +52,9 @@ config: $(KBUILD_DIR)/.config
 $(HOST_DEPS)/.ready: $(ROOT)/scripts/prepare-host-deps.sh
 	'$<' '$(BUILD_DIR)/host-deps'
 
-$(KERNEL): $(KBUILD_DIR)/.config $(HOST_DEPS)/.ready
+FORCE:
+
+$(KERNEL): $(KBUILD_DIR)/.config $(HOST_DEPS)/.ready FORCE
 	$(MAKE) -C '$(LINUX_DIR)' O='$(KBUILD_DIR)' LEX='$(LEX)' YACC='$(YACC)' \
 		HOSTCFLAGS='-I$(HOST_DEPS)/usr/include' \
 		HOSTLDFLAGS='-L$(HOST_DEPS)/usr/lib/x86_64-linux-gnu' \
@@ -59,7 +62,7 @@ $(KERNEL): $(KBUILD_DIR)/.config $(HOST_DEPS)/.ready
 
 kernel: $(KERNEL)
 
-$(KERF_RUNTIME)/.ready: $(ROOT)/scripts/prepare-kerf-runtime.sh $(ROOT)/scripts/rdtsc-init.py | preflight
+$(KERF_RUNTIME)/.ready: $(ROOT)/scripts/prepare-kerf-runtime.sh $(ROOT)/scripts/rdtsc-init.py $(KERF_PYTHON_SOURCES) | preflight
 	'$<' '$(KERF_DIR)' '$(BUILD_DIR)' '$(PYTHON)'
 
 kerf-runtime: $(KERF_RUNTIME)/.ready
