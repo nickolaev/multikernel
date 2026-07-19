@@ -95,6 +95,11 @@ if [ -c /dev/mktty0 ]; then
 		else
 			printf 'MK_SECONDARY_FAIL reason=vf-ping peer=10.0.2.2\n' >/dev/mktty0
 		fi
+		if /bin/busybox ping -c 1 -W 5 10.0.2.14 >/dev/null 2>&1; then
+			printf 'MK_SECONDARY_PRIMARY_REACHABLE netdev=%s peer=10.0.2.14 protocol=icmp\n' "$vf_netdev" >/dev/mktty0
+		else
+			printf 'MK_SECONDARY_FAIL reason=primary-ping peer=10.0.2.14\n' >/dev/mktty0
+		fi
 	fi
 	printf 'MK_SECONDARY_ALIVE instance=1 pid=%s\n' "$$" >/dev/mktty0
 else

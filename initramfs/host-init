@@ -55,7 +55,9 @@ for net_path in "$pf_path"/net/*; do
 done
 [ -n "$pf_netdev" ] || fail pf-netdev
 /bin/busybox ip link set "$pf_netdev" up || fail pf-link-up
+/bin/busybox ip addr add 10.0.2.14/24 dev "$pf_netdev" || fail pf-address
 printf 'MK_STAGE_PF_LINK_UP pf=%s netdev=%s\n' "$pf_bdf" "$pf_netdev"
+printf 'MK_STAGE_PF_ADDRESS pf=%s netdev=%s address=10.0.2.14/24\n' "$pf_bdf" "$pf_netdev"
 sleep 2
 [ -e "$pf_path/sriov_numvfs" ] || fail vf-missing-sriov
 printf '1\n' >"$pf_path/sriov_numvfs" || fail vf-enable
