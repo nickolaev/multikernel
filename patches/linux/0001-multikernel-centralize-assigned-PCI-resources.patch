@@ -1,19 +1,26 @@
-From ad67592439cda5878bc098685399f86b7fa84cdc Mon Sep 17 00:00:00 2001
+From 47a7772e585a582880360cd349fed988b704cdf0 Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
-Date: Thu, 16 Jul 2026 08:45:21 +0300
+Date: Sun, 19 Jul 2026 03:11:26 +0300
 Subject: [PATCH 1/4] multikernel: centralize assigned PCI resources
 
+Keep assigned PCI devices and BAR metadata in each instance.
+
+Carry PCI host-bridge descriptors through the device-tree transport.
+
+This gives architecture code one owned source of assignment state.
+
+Signed-off-by: Nikolay Nikolaev <nicknickolaev@gmail.com>
 ---
  include/linux/multikernel.h   |  43 ++++-
  kernel/multikernel/Makefile   |   2 +-
  kernel/multikernel/baseline.c |  12 ++
  kernel/multikernel/core.c     |  26 +++
- kernel/multikernel/dts.c      | 308 +++++++++++++++++++++++++++++++++-
+ kernel/multikernel/dts.c      | 310 +++++++++++++++++++++++++++++++++-
  kernel/multikernel/internal.h |   8 +
  kernel/multikernel/kernfs.c   |   1 +
  kernel/multikernel/kho.c      | 116 +++----------
  kernel/multikernel/pci.c      | 137 +++++++++++++++
- 9 files changed, 556 insertions(+), 97 deletions(-)
+ 9 files changed, 558 insertions(+), 97 deletions(-)
  create mode 100644 kernel/multikernel/pci.c
 
 diff --git a/include/linux/multikernel.h b/include/linux/multikernel.h
@@ -202,7 +209,7 @@ index feb570bd53cf..ac08a5062cd0 100644
  	ret = mk_instance_reserve_platform_devices(instance, config);
  	if (ret) {
 diff --git a/kernel/multikernel/dts.c b/kernel/multikernel/dts.c
-index e45c079b3232..fb55ebb512db 100644
+index e45c079b3232..d3cf7e646604 100644
 --- a/kernel/multikernel/dts.c
 +++ b/kernel/multikernel/dts.c
 @@ -17,6 +17,7 @@
@@ -583,17 +590,18 @@ index e45c079b3232..fb55ebb512db 100644
  /**
   * mk_dt_generate_instance_dtb() - Generate instance DTB from kernel data structures
   * @instance: Instance with transferred resources (CPUs, memory, devices)
-@@ -971,6 +1228,9 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
+@@ -971,6 +1228,10 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
  		if (ret) goto err_free;
  	}
  
 +	ret = mk_dt_emit_pci_host_bridges(fdt, instance);
-+	if (ret) goto err_free;
++	if (ret)
++		goto err_free;
 +
  	if ((instance->pci_devices_valid && instance->pci_device_count > 0) ||
  	    (instance->platform_devices_valid && instance->platform_device_count > 0)) {
  		ret = fdt_begin_node(fdt, "devices");
-@@ -982,6 +1242,40 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
+@@ -982,6 +1243,40 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
  			list_for_each_entry(pci_dev, &instance->pci_devices, list) {
  				char node_name[64];
  				char pci_id_str[32];
@@ -634,13 +642,14 @@ index e45c079b3232..fb55ebb512db 100644
  
  				snprintf(node_name, sizeof(node_name), "%s",
  					 pci_dev->name[0] ? pci_dev->name : "unnamed_pci");
-@@ -1003,6 +1297,10 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
+@@ -1003,6 +1298,11 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
  				ret = fdt_property_u32(fdt, "device-id", pci_dev->device);
  				if (ret) goto err_free;
  
 +				ret = fdt_property(fdt, "bar-resources", resources,
 +						   sizeof(resources));
-+				if (ret) goto err_free;
++				if (ret)
++					goto err_free;
 +
  				ret = fdt_end_node(fdt);
  				if (ret) goto err_free;
@@ -995,3 +1004,8 @@ index 000000000000..b430401085ef
 +	return false;
 +}
 +EXPORT_SYMBOL_GPL(mk_pci_should_probe);
+
+base-commit: 483192c3889ca357f8b9cdf5342e747dc456b8f1
+-- 
+2.53.0
+

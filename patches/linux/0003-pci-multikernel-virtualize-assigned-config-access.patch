@@ -1,0 +1,232 @@
+From e24e0d414f66de329d15a08aad00f2edcab04bf9 Mon Sep 17 00:00:00 2001
+From: Nikolay Nikolaev <nicknickolaev@gmail.com>
+Date: Sun, 19 Jul 2026 03:01:31 +0300
+Subject: [PATCH 3/4] pci/multikernel: virtualize assigned config access
+
+Filter root PCI config access in arch/x86/multikernel.
+
+Synthesize assigned VF identity and restore BARs with a PCI header fixup.
+
+Remove multikernel branches from drivers/pci/probe.c.
+
+Signed-off-by: Nikolay Nikolaev <nicknickolaev@gmail.com>
+---
+ arch/x86/multikernel/pci.c  | 44 +++++++++++++++++++++++++++++++++++++
+ drivers/pci/probe.c         |  9 --------
+ include/linux/multikernel.h |  5 +++--
+ kernel/multikernel/pci.c    | 37 ++++++++++++++++++++-----------
+ 4 files changed, 71 insertions(+), 24 deletions(-)
+
+diff --git a/arch/x86/multikernel/pci.c b/arch/x86/multikernel/pci.c
+index 1b2409ac8262..41d7d2c9d4f5 100644
+--- a/arch/x86/multikernel/pci.c
++++ b/arch/x86/multikernel/pci.c
+@@ -21,6 +21,47 @@ struct mk_mmcfg_snapshot {
+ 	size_t count;
+ };
+ 
++static struct pci_ops mk_pci_native_ops;
++
++static bool mk_pci_identity_read(struct pci_bus *bus, unsigned int devfn,
++				 int where, int size, u32 *value)
++{
++	u16 vendor, device;
++	u32 identity;
++	u32 mask;
++
++	if (where < PCI_VENDOR_ID || where + size > PCI_COMMAND ||
++	    !mk_pci_get_assigned_identity(bus, devfn, &vendor, &device))
++		return false;
++
++	identity = vendor | (u32)device << 16;
++	mask = size == sizeof(identity) ? ~0U : (1U << (size * 8)) - 1;
++	*value = (identity >> (where * 8)) & mask;
++	return true;
++}
++
++static int mk_pci_read(struct pci_bus *bus, unsigned int devfn, int where,
++		       int size, u32 *value)
++{
++	if (!mk_pci_should_probe(bus, devfn, &mk_pci_native_ops)) {
++		*value = ~0U;
++		return PCIBIOS_DEVICE_NOT_FOUND;
++	}
++	if (mk_pci_identity_read(bus, devfn, where, size, value))
++		return PCIBIOS_SUCCESSFUL;
++
++	return mk_pci_native_ops.read(bus, devfn, where, size, value);
++}
++
++static int mk_pci_write(struct pci_bus *bus, unsigned int devfn, int where,
++			int size, u32 value)
++{
++	if (!mk_pci_should_probe(bus, devfn, &mk_pci_native_ops))
++		return PCIBIOS_DEVICE_NOT_FOUND;
++
++	return mk_pci_native_ops.write(bus, devfn, where, size, value);
++}
++
+ #ifdef CONFIG_PCI_MMCONFIG
+ static int mk_mmcfg_snapshot_region(const struct pci_mmcfg_region *region,
+ 				    void *data)
+@@ -102,6 +143,9 @@ static int __init x86_multikernel_pci_arch_init(void)
+ 
+ 	raw_pci_ops = &pci_mmcfg;
+ 	raw_pci_ext_ops = &pci_mmcfg;
++	mk_pci_native_ops = pci_root_ops;
++	pci_root_ops.read = mk_pci_read;
++	pci_root_ops.write = mk_pci_write;
+ 	pr_notice("Multikernel selected ECAM for PCI config access\n");
+ 
+ 	if (!root_instance->pci_devices_valid ||
+diff --git a/drivers/pci/probe.c b/drivers/pci/probe.c
+index eed1f98d556f..b5a6ddc32bee 100644
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -23,7 +23,6 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/bitfield.h>
+ #ifdef CONFIG_MULTIKERNEL
+-#include <linux/multikernel.h>
+ #endif
+ #include "pci.h"
+ 
+@@ -2625,14 +2624,6 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
+ 	struct pci_dev *dev;
+ 	u32 l;
+ 
+-	/*
+-	 * For multikernel spawns, check if we should even probe this location
+-	 * BEFORE any config space access. This prevents hardware conflicts
+-	 * when the host kernel is also using PCI devices.
+-	 */
+-	if (IS_ENABLED(CONFIG_MULTIKERNEL) && !mk_pci_should_probe(bus, devfn))
+-		return NULL;
+-
+ 	/*
+ 	 * Create pwrctrl device (if required) for the PCI device to handle the
+ 	 * power state. If the pwrctrl device is created, then skip scanning
+diff --git a/include/linux/multikernel.h b/include/linux/multikernel.h
+index 99b8f100e28b..4a9420c6e3bb 100644
+--- a/include/linux/multikernel.h
++++ b/include/linux/multikernel.h
+@@ -15,6 +15,7 @@
+ #include <linux/genalloc.h>
+ struct pci_bus;
+ struct pci_dev;
++struct pci_ops;
+ 
+ /**
+  * Multikernel IPI interface
+@@ -852,10 +853,10 @@ void __init mk_register_cpus_from_kho(void);
+  *
+  * Returns: true if probing should proceed, false to skip entirely
+  */
+-bool mk_pci_should_probe(struct pci_bus *bus, int devfn);
++bool mk_pci_should_probe(struct pci_bus *bus, int devfn,
++			 const struct pci_ops *ops);
+ bool mk_pci_get_assigned_identity(struct pci_bus *bus, int devfn,
+ 				  u16 *vendor, u16 *device);
+-void mk_pci_restore_resources(struct pci_dev *dev);
+ 
+ /**
+  * mk_platform_device_allowed() - Check if a platform device is allowed by DTB allowlist
+diff --git a/kernel/multikernel/pci.c b/kernel/multikernel/pci.c
+index b430401085ef..5fc3917cffda 100644
+--- a/kernel/multikernel/pci.c
++++ b/kernel/multikernel/pci.c
+@@ -12,8 +12,7 @@
+ 
+ #include "internal.h"
+ 
+-static struct mk_pci_device *mk_pci_find_assigned(struct pci_bus *bus,
+-						   int devfn)
++static struct mk_pci_device *mk_pci_find_assigned(struct pci_bus *bus, int devfn)
+ {
+ 	struct mk_pci_device *device;
+ 	u16 domain = pci_domain_nr(bus);
+@@ -59,7 +58,7 @@ bool mk_pci_get_assigned_identity(struct pci_bus *bus, int devfn,
+ }
+ EXPORT_SYMBOL_GPL(mk_pci_get_assigned_identity);
+ 
+-void mk_pci_restore_resources(struct pci_dev *dev)
++static void mk_pci_restore_resources(struct pci_dev *dev)
+ {
+ 	struct mk_pci_device *device;
+ 	int i;
+@@ -75,23 +74,33 @@ void mk_pci_restore_resources(struct pci_dev *dev)
+ 	}
+ 	pr_info("Restored PCI BAR resources for %s\n", pci_name(dev));
+ }
+-EXPORT_SYMBOL_GPL(mk_pci_restore_resources);
+ 
+-static bool mk_pci_bridge_reaches_assigned(struct pci_bus *bus, int devfn)
++DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, mk_pci_restore_resources);
++
++static bool mk_pci_bridge_reaches_assigned(struct pci_bus *bus, int devfn,
++					   const struct pci_ops *ops)
+ {
+ 	struct mk_pci_device *device;
+ 	u16 domain = pci_domain_nr(bus);
+ 	u8 secondary_bus = 0;
+ 	u8 subordinate_bus = 0;
+ 	u8 hdr_type;
++	u32 value;
+ 
+-	if (pci_bus_read_config_byte(bus, devfn, PCI_HEADER_TYPE, &hdr_type) ||
+-	    (hdr_type & PCI_HEADER_TYPE_MASK) != PCI_HEADER_TYPE_BRIDGE)
++	if (ops->read(bus, devfn, PCI_HEADER_TYPE, sizeof(hdr_type), &value))
++		return false;
++	hdr_type = value;
++	if ((hdr_type & PCI_HEADER_TYPE_MASK) != PCI_HEADER_TYPE_BRIDGE)
+ 		return false;
+ 
+-	pci_bus_read_config_byte(bus, devfn, PCI_SECONDARY_BUS, &secondary_bus);
+-	pci_bus_read_config_byte(bus, devfn, PCI_SUBORDINATE_BUS,
+-				 &subordinate_bus);
++	if (ops->read(bus, devfn, PCI_SECONDARY_BUS, sizeof(secondary_bus),
++		      &value))
++		return false;
++	secondary_bus = value;
++	if (ops->read(bus, devfn, PCI_SUBORDINATE_BUS,
++		      sizeof(subordinate_bus), &value))
++		return false;
++	subordinate_bus = value;
+ 	if (!secondary_bus || subordinate_bus < secondary_bus)
+ 		return false;
+ 
+@@ -108,18 +117,20 @@ static bool mk_pci_bridge_reaches_assigned(struct pci_bus *bus, int devfn)
+  * mk_pci_should_probe - Check whether PCI probing may access a location
+  * @bus: PCI bus
+  * @devfn: device/function number
++ * @ops: unfiltered config-space operations used to identify bridge paths
+  *
+  * Exact assigned functions and bridges leading to downstream assignments are
+  * visible. Other functions are rejected before their config space is read.
+  *
+  * Returns: true if probing should proceed, false to skip entirely.
+  */
+-bool mk_pci_should_probe(struct pci_bus *bus, int devfn)
++bool mk_pci_should_probe(struct pci_bus *bus, int devfn,
++			 const struct pci_ops *ops)
+ {
+ 	struct mk_pci_device *device;
+ 	u16 domain = pci_domain_nr(bus);
+ 
+-	if (!root_instance || !root_instance->dtb_data)
++	if (!ops || !root_instance || !root_instance->dtb_data)
+ 		return true;
+ 	if (!root_instance->pci_devices_valid ||
+ 	    !root_instance->pci_device_count)
+@@ -129,7 +140,7 @@ bool mk_pci_should_probe(struct pci_bus *bus, int devfn)
+ 
+ 	list_for_each_entry(device, &root_instance->pci_devices, list) {
+ 		if (device->domain == domain && device->bus > bus->number)
+-			return mk_pci_bridge_reaches_assigned(bus, devfn);
++			return mk_pci_bridge_reaches_assigned(bus, devfn, ops);
+ 	}
+ 
+ 	return false;
+-- 
+2.53.0
+
