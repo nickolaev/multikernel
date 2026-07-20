@@ -1,4 +1,4 @@
-From 9994e4ce21a1bd3ac1df7a7401f22e55e29381a1 Mon Sep 17 00:00:00 2001
+From 335945ad9c8a1b3b40cba9a1c144dc49f5c63007 Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
 Date: Sun, 19 Jul 2026 03:11:26 +0300
 Subject: [PATCH 1/4] multikernel: centralize assigned PCI resources
@@ -24,7 +24,7 @@ Signed-off-by: Nikolay Nikolaev <nicknickolaev@gmail.com>
  create mode 100644 kernel/multikernel/pci.c
 
 diff --git a/include/linux/multikernel.h b/include/linux/multikernel.h
-index 9d27b93d44d4..8c090302b334 100644
+index 8393b667d843..9d623a80d4d8 100644
 --- a/include/linux/multikernel.h
 +++ b/include/linux/multikernel.h
 @@ -13,6 +13,8 @@
@@ -36,7 +36,7 @@ index 9d27b93d44d4..8c090302b334 100644
  
  /**
   * Multikernel IPI interface
-@@ -358,6 +360,12 @@ struct mk_memory_region {
+@@ -357,6 +359,12 @@ struct mk_memory_region {
   * Represents a single PCI device that should be accessible to an instance.
   * Format: vendor:device@domain:bus:slot.func
   */
@@ -49,7 +49,7 @@ index 9d27b93d44d4..8c090302b334 100644
  struct mk_pci_device {
  	char name[64];     /* Device name from DTB (e.g., "enp9s0_dev") */
  	u16 vendor;        /* PCI vendor ID */
-@@ -366,9 +374,29 @@ struct mk_pci_device {
+@@ -365,9 +373,29 @@ struct mk_pci_device {
  	u8 bus;            /* PCI bus number */
  	u8 slot;           /* PCI slot number */
  	u8 func;           /* PCI function number */
@@ -79,7 +79,7 @@ index 9d27b93d44d4..8c090302b334 100644
  /**
   * Platform device specification
   *
-@@ -409,13 +437,18 @@ struct mk_dt_config {
+@@ -408,13 +436,18 @@ struct mk_dt_config {
  	int pci_device_count;            /* Number of PCI devices */
  	bool pci_devices_valid;          /* Whether PCI device list is valid */
  
@@ -99,7 +99,7 @@ index 9d27b93d44d4..8c090302b334 100644
  
  	/* Raw device tree data */
  	void *dtb_data;
-@@ -448,6 +481,11 @@ struct mk_instance {
+@@ -447,6 +480,11 @@ struct mk_instance {
  	int pci_device_count;            /* Number of PCI devices */
  	bool pci_devices_valid;          /* Whether PCI device list is valid */
  
@@ -111,7 +111,7 @@ index 9d27b93d44d4..8c090302b334 100644
  	/* Platform device resources */
  	struct list_head platform_devices;   /* List of struct mk_platform_device */
  	int platform_device_count;           /* Number of platform devices */
-@@ -818,6 +856,9 @@ void __init mk_register_cpus_from_kho(void);
+@@ -817,6 +855,9 @@ void __init mk_register_cpus_from_kho(void);
   * Returns: true if probing should proceed, false to skip entirely
   */
  bool mk_pci_should_probe(struct pci_bus *bus, int devfn);
@@ -135,10 +135,10 @@ index c62c2cc40c09..8c9142945b65 100644
  # DMA-BUF heap for multikernel memory allocation
  obj-$(CONFIG_DMABUF_HEAPS) += dma_heap.o
 diff --git a/kernel/multikernel/baseline.c b/kernel/multikernel/baseline.c
-index 3d2b1d71db5a..4816f7584ad0 100644
+index 59b54b290b9f..63d72b6fb26f 100644
 --- a/kernel/multikernel/baseline.c
 +++ b/kernel/multikernel/baseline.c
-@@ -160,6 +160,9 @@ static void mk_baseline_clear_resources(struct mk_instance *instance)
+@@ -176,6 +176,9 @@ static void mk_baseline_clear_resources(struct mk_instance *instance)
  	}
  	instance->pci_device_count = 0;
  	instance->pci_devices_valid = false;
@@ -148,7 +148,7 @@ index 3d2b1d71db5a..4816f7584ad0 100644
  
  	list_for_each_entry_safe(plat_dev, plat_tmp, &instance->platform_devices, list) {
  		list_del(&plat_dev->list);
-@@ -550,6 +553,15 @@ int mk_baseline_validate_and_initialize(const void *fdt, size_t fdt_size)
+@@ -591,6 +594,15 @@ int mk_baseline_validate_and_initialize(const void *fdt, size_t fdt_size)
  		return ret;
  	}
  
@@ -662,7 +662,7 @@ index e45c079b3232..ffc7a2dfb993 100644
  				if (ret) goto err_free;
  			}
 diff --git a/kernel/multikernel/internal.h b/kernel/multikernel/internal.h
-index b244392c107b..7e8114a35bd0 100644
+index a3aa40eb1e88..3ea686b71f5f 100644
 --- a/kernel/multikernel/internal.h
 +++ b/kernel/multikernel/internal.h
 @@ -18,6 +18,14 @@ int mk_dt_parse_resources(const void *fdt, int resources_node,
@@ -1023,7 +1023,7 @@ index 000000000000..2ddb47f2a177
 +	return false;
 +}
 
-base-commit: 483192c3889ca357f8b9cdf5342e747dc456b8f1
+base-commit: 950af5229a4d83aa4db8dea66cd76987ac52863b
 -- 
 2.53.0
 

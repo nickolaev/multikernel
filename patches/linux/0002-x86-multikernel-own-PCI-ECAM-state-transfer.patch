@@ -1,4 +1,4 @@
-From e27c20ed445df9873d0f83adfc762f2fa475ad26 Mon Sep 17 00:00:00 2001
+From e5cafb68e29edee1aedfeac2069042efa86d234c Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
 Date: Sun, 19 Jul 2026 03:11:40 +0300
 Subject: [PATCH 2/4] x86/multikernel: own PCI ECAM state transfer
@@ -250,10 +250,10 @@ index 1f4522325920..c22666789167 100644
  {
  	if (cfg->res.parent)
 diff --git a/include/linux/multikernel.h b/include/linux/multikernel.h
-index 8c090302b334..99b8f100e28b 100644
+index 9d623a80d4d8..a5142add1840 100644
 --- a/include/linux/multikernel.h
 +++ b/include/linux/multikernel.h
-@@ -393,9 +393,6 @@ struct mk_pci_host_bridge {
+@@ -392,9 +392,6 @@ struct mk_pci_host_bridge {
  	struct list_head list;
  };
  #define MK_MAX_PCI_HOST_BRIDGES 16

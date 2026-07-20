@@ -1,4 +1,4 @@
-From eb8c7b95d28d8ea052800cf4330148631b261e3e Mon Sep 17 00:00:00 2001
+From e9d2bddbac5308677afaf530644fa8f607e053df Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
 Date: Sun, 19 Jul 2026 03:01:31 +0300
 Subject: [PATCH 3/4] pci/multikernel: virtualize assigned config access
@@ -109,7 +109,7 @@ index eed1f98d556f..41183aed8f5d 100644
  	 * Create pwrctrl device (if required) for the PCI device to handle the
  	 * power state. If the pwrctrl device is created, then skip scanning
 diff --git a/include/linux/multikernel.h b/include/linux/multikernel.h
-index 99b8f100e28b..9404f4d2fbc4 100644
+index a5142add1840..59f08e089731 100644
 --- a/include/linux/multikernel.h
 +++ b/include/linux/multikernel.h
 @@ -14,7 +14,7 @@
@@ -121,7 +121,7 @@ index 99b8f100e28b..9404f4d2fbc4 100644
  
  /**
   * Multikernel IPI interface
-@@ -852,10 +852,10 @@ void __init mk_register_cpus_from_kho(void);
+@@ -851,10 +851,10 @@ void __init mk_register_cpus_from_kho(void);
   *
   * Returns: true if probing should proceed, false to skip entirely
   */

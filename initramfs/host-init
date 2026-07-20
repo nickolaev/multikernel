@@ -41,9 +41,14 @@ expect_status()
 mount -t proc proc /proc || fail mount-proc
 mount -t sysfs sysfs /sys || fail mount-sysfs
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-
-grep -q 'Multikernel Memory Pool' /proc/iomem || fail pool-reservation
-printf 'MK_STAGE_POOL_OK size=512M base=0x40000000\n'
+/bin/busybox insmod /lib/modules/lazy_cma.ko || fail lazy-cma-module
+pool_output=$(/bin/lazy_cma_tool -a 512 -n 'Multikernel Memory Pool') \
+	|| fail pool-allocation
+pool_base=${pool_output##* }
+case "$pool_base" in
+	0x[0-9a-fA-F]*) ;;
+	*) fail pool-address ;;
+esac
 
 pf_bdf=0000:00:02.0
 pf_path=/sys/bus/pci/devices/$pf_bdf
@@ -78,6 +83,7 @@ vf_device=$(cat "$vf_path/device")
 vf_vendor=${vf_vendor#0x}
 vf_device=${vf_device#0x}
 /bin/busybox sed \
+	-e "s/@MEMORY_BASE@/$pool_base/g" \
 	-e "s/@VF_BDF@/$vf_bdf/g" \
 	-e "s/@VF_VENDOR@/$vf_vendor/g" \
 	-e "s/@VF_DEVICE@/$vf_device/g" \
@@ -86,6 +92,8 @@ printf 'MK_STAGE_VF_CREATED pf=%s vf=%s vendor=%s device=%s\n' \
 	"$pf_bdf" "$vf_bdf" "$vf_vendor" "$vf_device"
 
 kerf init --input=/run/baseline.dts || fail kerf-init
+grep -q 'Multikernel Memory Pool' /proc/iomem || fail pool-handoff
+printf 'MK_STAGE_POOL_OK size=512M base=%s\n' "$pool_base"
 [ ! -e "$vf_path/driver" ] || fail vf-still-bound-to-primary
 pf_driver=$(/bin/busybox readlink "$pf_path/driver" 2>/dev/null || true)
 case "$pf_driver" in
@@ -95,7 +103,7 @@ esac
 printf 'MK_STAGE_PF_RETAINED pf=%s driver=igb\n' "$pf_bdf"
 printf 'MK_STAGE_KERF_INIT_OK cpu=2 memory=512M\n'
 kerf create qemu-demo --id=1 --cpus=2 --memory=256MB \
-	--memory-base=0x40000000 --devices=igbvf0 || fail kerf-create
+	--memory-base="$pool_base" --devices=igbvf0 || fail kerf-create
 printf 'MK_STAGE_KERF_CREATE_OK id=1\n'
 expect_status ready || fail status-ready
 grep -q 'pci-host-bridges' /sys/fs/multikernel/instances/qemu-demo/device_tree \

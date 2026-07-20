@@ -4,3 +4,6 @@
 [submodule "kerf"]
 	path = kerf
 	url = https://github.com/multikernel/kerf.git
+[submodule "lazy_cma"]
+	path = lazy_cma
+	url = https://github.com/multikernel/lazy_cma.git

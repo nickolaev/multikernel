@@ -3,11 +3,14 @@ SHELL := /bin/bash
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 LINUX_DIR ?= $(ROOT)/linux
 KERF_DIR ?= $(ROOT)/kerf
+LAZY_CMA_DIR ?= $(ROOT)/lazy_cma
 BUILD_DIR ?= $(ROOT)/build
 KBUILD_DIR := $(BUILD_DIR)/kernel
 HOST_DEPS := $(BUILD_DIR)/host-deps/root
 KERF_RUNTIME := $(BUILD_DIR)/kerf-runtime
+LAZY_CMA_BUILD := $(BUILD_DIR)/lazy-cma
 KERF_PYTHON_SOURCES := $(shell find '$(KERF_DIR)/src/kerf' -type f -name '*.py')
+LAZY_CMA_SOURCES := $(LAZY_CMA_DIR)/lazy_cma.c $(LAZY_CMA_DIR)/lazy_cma_tool.c $(LAZY_CMA_DIR)/version.h
 JOBS ?= $(shell nproc)
 CC ?= cc
 PYTHON ?= $(shell command -v python3 2>/dev/null)
@@ -21,7 +24,7 @@ SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
 
-.PHONY: all preflight config kernel kerf-runtime initrd build run test clean help FORCE
+.PHONY: all preflight config kernel kerf-runtime lazy-cma initrd build run test clean help FORCE
 
 all: build
 
@@ -34,7 +37,7 @@ help:
 	  'make clean   - remove only the top-level build directory'
 
 preflight:
-	@LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' BUSYBOX='$(BUSYBOX)' \
+	@LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' LAZY_CMA_DIR='$(LAZY_CMA_DIR)' BUSYBOX='$(BUSYBOX)' \
 		QEMU='$(QEMU)' CC='$(CC)' PYTHON='$(PYTHON)' \
 		LEX='$(LEX)' YACC='$(YACC)' \
 		'$(ROOT)/scripts/preflight.sh'
@@ -58,7 +61,7 @@ $(KERNEL): $(KBUILD_DIR)/.config $(HOST_DEPS)/.ready FORCE
 	$(MAKE) -C '$(LINUX_DIR)' O='$(KBUILD_DIR)' LEX='$(LEX)' YACC='$(YACC)' \
 		HOSTCFLAGS='-I$(HOST_DEPS)/usr/include' \
 		HOSTLDFLAGS='-L$(HOST_DEPS)/usr/lib/x86_64-linux-gnu' \
-		-j'$(JOBS)' bzImage
+		-j'$(JOBS)' bzImage modules
 
 kernel: $(KERNEL)
 
@@ -67,12 +70,25 @@ $(KERF_RUNTIME)/.ready: $(ROOT)/scripts/prepare-kerf-runtime.sh $(ROOT)/scripts/
 
 kerf-runtime: $(KERF_RUNTIME)/.ready
 
+$(LAZY_CMA_BUILD)/.ready: $(KERNEL) $(ROOT)/config/lazy-cma.Kbuild $(LAZY_CMA_SOURCES)
+	rm -rf -- '$(LAZY_CMA_BUILD)'
+	mkdir -p '$(LAZY_CMA_BUILD)'
+	install -m 0644 '$(ROOT)/config/lazy-cma.Kbuild' '$(LAZY_CMA_BUILD)/Makefile'
+	install -m 0644 '$(LAZY_CMA_DIR)/lazy_cma.c' '$(LAZY_CMA_DIR)/version.h' '$(LAZY_CMA_BUILD)/'
+	$(MAKE) -C '$(KBUILD_DIR)' M='$(LAZY_CMA_BUILD)' -j'$(JOBS)' modules
+	$(CC) -static -Wall -O2 -I'$(LAZY_CMA_DIR)' -o '$(LAZY_CMA_BUILD)/lazy_cma_tool' \
+		'$(LAZY_CMA_DIR)/lazy_cma_tool.c'
+	touch '$@'
+
+lazy-cma: $(LAZY_CMA_BUILD)/.ready
+
 $(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-initramfs.sh | preflight
 	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<'
 
-$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(ROOT)/initramfs/baseline.dts $(ROOT)/scripts/build-initramfs.sh
+$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(ROOT)/initramfs/baseline.dts $(ROOT)/scripts/build-initramfs.sh
 	'$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
-		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' '$(ROOT)/initramfs/baseline.dts'
+		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' '$(ROOT)/initramfs/baseline.dts' \
+		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool'
 
 initrd: $(SECONDARY_INITRD) $(HOST_INITRD)
 

@@ -9,7 +9,7 @@ initrd="${build_dir}/host-initrd.cpio.gz"
 log="${build_dir}/qemu-serial.log"
 qemu=${QEMU:-qemu-system-x86_64}
 cpus=${QEMU_CPUS:-4}
-memory_mb=${QEMU_MEMORY_MB:-2048}
+memory_mb=${QEMU_MEMORY_MB:-6144}
 timeout_seconds=${QEMU_TIMEOUT:-180}
 
 [[ "${mode}" == run || "${mode}" == test ]] || { printf 'unknown mode: %s\n' "${mode}" >&2; exit 1; }
@@ -18,7 +18,7 @@ timeout_seconds=${QEMU_TIMEOUT:-180}
 	exit 1
 }
 (( cpus >= 3 )) || { printf 'QEMU_CPUS must be at least 3\n' >&2; exit 1; }
-(( memory_mb >= 1536 )) || { printf 'QEMU_MEMORY_MB must be at least 1536\n' >&2; exit 1; }
+(( memory_mb >= 5120 )) || { printf 'QEMU_MEMORY_MB must be at least 5120\n' >&2; exit 1; }
 
 args=(
 	-machine q35,accel=tcg
@@ -27,7 +27,7 @@ args=(
 	-m "${memory_mb}"
 	-kernel "${kernel}"
 	-initrd "${initrd}"
-	-append 'console=ttyS0,115200 rdinit=/init panic=-1 mkkernel_pool=512M@0x40000000 kho=on'
+	-append 'console=ttyS0,115200 rdinit=/init panic=-1 kho=on'
 	-nographic
 	-monitor none
 	-no-reboot
