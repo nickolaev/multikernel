@@ -1,4 +1,4 @@
-From 22ddd19bc97e94cda37156cc67cf574c2d2859cf Mon Sep 17 00:00:00 2001
+From e27c20ed445df9873d0f83adfc762f2fa475ad26 Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
 Date: Sun, 19 Jul 2026 03:11:40 +0300
 Subject: [PATCH 2/4] x86/multikernel: own PCI ECAM state transfer
@@ -12,14 +12,14 @@ Use x86 platform callbacks so arch/x86/pci/init.c stays generic.
 Signed-off-by: Nikolay Nikolaev <nicknickolaev@gmail.com>
 ---
  arch/x86/include/asm/multikernel.h |  13 +++
- arch/x86/include/asm/pci_x86.h     |  14 +++
+ arch/x86/include/asm/pci_x86.h     |   4 +
  arch/x86/kernel/platform-quirks.c  |   1 +
  arch/x86/multikernel/Makefile      |   2 +-
- arch/x86/multikernel/pci.c         | 151 +++++++++++++++++++++++++++++
- arch/x86/pci/mmconfig-shared.c     |  19 ++++
+ arch/x86/multikernel/pci.c         | 125 +++++++++++++++++++++++++++++
+ arch/x86/pci/mmconfig-shared.c     |  19 +++++
  include/linux/multikernel.h        |   3 -
  kernel/multikernel/dts.c           |   1 +
- 8 files changed, 200 insertions(+), 4 deletions(-)
+ 8 files changed, 164 insertions(+), 4 deletions(-)
  create mode 100644 arch/x86/multikernel/pci.c
 
 diff --git a/arch/x86/include/asm/multikernel.h b/arch/x86/include/asm/multikernel.h
@@ -52,26 +52,16 @@ index 15a16da43d05..6684ad315d95 100644
 +
  #endif /* _ASM_X86_MULTIKERNEL_H */
 diff --git a/arch/x86/include/asm/pci_x86.h b/arch/x86/include/asm/pci_x86.h
-index 70533fdcbf02..fb0639f9d67d 100644
+index 70533fdcbf02..668bfead0386 100644
 --- a/arch/x86/include/asm/pci_x86.h
 +++ b/arch/x86/include/asm/pci_x86.h
-@@ -190,6 +190,20 @@ extern struct pci_mmcfg_region *__init pci_mmconfig_add(int segment, int start,
+@@ -190,6 +190,10 @@ extern struct pci_mmcfg_region *__init pci_mmconfig_add(int segment, int start,
  
  extern struct list_head pci_mmcfg_list;
  
-+#ifdef CONFIG_PCI_MMCONFIG
 +typedef int (*pci_mmcfg_region_cb)(const struct pci_mmcfg_region *region,
 +				   void *data);
 +int pci_mmcfg_walk_regions(pci_mmcfg_region_cb callback, void *data);
-+#else
-+typedef int (*pci_mmcfg_region_cb)(const struct pci_mmcfg_region *region,
-+				   void *data);
-+static inline int pci_mmcfg_walk_regions(pci_mmcfg_region_cb callback,
-+					  void *data)
-+{
-+	return -ENODEV;
-+}
-+#endif
 +
  #define PCI_MMCFG_BUS_OFFSET(bus)      ((bus) << 20)
  
@@ -100,10 +90,10 @@ index 331bd895af1f..f4d399154f4c 100644
 +obj-y += spawn.o pci.o direct_boot.o head_64.o
 diff --git a/arch/x86/multikernel/pci.c b/arch/x86/multikernel/pci.c
 new file mode 100644
-index 000000000000..1b2409ac8262
+index 000000000000..80bbc4344eee
 --- /dev/null
 +++ b/arch/x86/multikernel/pci.c
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,125 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * x86 PCI support for multikernel spawn kernels.
@@ -178,10 +168,6 @@ index 000000000000..1b2409ac8262
 +static int __init x86_multikernel_pci_arch_init(void)
 +{
 +	const struct mk_pci_host_bridge *bridge;
-+	const struct mk_pci_device *device;
-+	u32 class_revision = ~0U;
-+	u32 value = ~0U;
-+	int ret;
 +
 +	if (!root_instance || !root_instance->pci_host_bridges_valid ||
 +	    !root_instance->pci_host_bridge_count) {
@@ -209,28 +195,6 @@ index 000000000000..1b2409ac8262
 +	raw_pci_ops = &pci_mmcfg;
 +	raw_pci_ext_ops = &pci_mmcfg;
 +	pr_notice("Multikernel selected ECAM for PCI config access\n");
-+
-+	if (!root_instance->pci_devices_valid ||
-+	    !root_instance->pci_device_count)
-+		return 1;
-+	device = list_first_entry(&root_instance->pci_devices,
-+				  struct mk_pci_device, list);
-+	ret = pci_mmcfg.read(device->domain, device->bus,
-+		PCI_DEVFN(device->slot, device->func), PCI_VENDOR_ID,
-+		sizeof(value), &value);
-+	pr_notice("MK_SECONDARY_ECAM_CONFIG_READ bdf=%04x:%02x:%02x.%x value=%#010x\n",
-+		  device->domain, device->bus, device->slot, device->func, value);
-+	if (ret)
-+		return 1;
-+
-+	ret = pci_mmcfg.read(device->domain, device->bus,
-+		PCI_DEVFN(device->slot, device->func), PCI_CLASS_REVISION,
-+		sizeof(class_revision), &class_revision);
-+	pr_notice("MK_SECONDARY_ECAM_CLASS_READ bdf=%04x:%02x:%02x.%x value=%#010x\n",
-+		  device->domain, device->bus, device->slot, device->func,
-+		  class_revision);
-+	if (ret || (class_revision >> 8) == 0xffffff)
-+		return 1;
 +
 +	return 0;
 +}
@@ -300,7 +264,7 @@ index 8c090302b334..99b8f100e28b 100644
  /**
   * Platform device specification
 diff --git a/kernel/multikernel/dts.c b/kernel/multikernel/dts.c
-index d3cf7e646604..fe7bc75a6e10 100644
+index ffc7a2dfb993..ebe202ee33af 100644
 --- a/kernel/multikernel/dts.c
 +++ b/kernel/multikernel/dts.c
 @@ -22,6 +22,7 @@

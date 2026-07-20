@@ -1,4 +1,4 @@
-From 47a7772e585a582880360cd349fed988b704cdf0 Mon Sep 17 00:00:00 2001
+From 9994e4ce21a1bd3ac1df7a7401f22e55e29381a1 Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
 Date: Sun, 19 Jul 2026 03:11:26 +0300
 Subject: [PATCH 1/4] multikernel: centralize assigned PCI resources
@@ -15,12 +15,12 @@ Signed-off-by: Nikolay Nikolaev <nicknickolaev@gmail.com>
  kernel/multikernel/Makefile   |   2 +-
  kernel/multikernel/baseline.c |  12 ++
  kernel/multikernel/core.c     |  26 +++
- kernel/multikernel/dts.c      | 310 +++++++++++++++++++++++++++++++++-
+ kernel/multikernel/dts.c      | 311 +++++++++++++++++++++++++++++++++-
  kernel/multikernel/internal.h |   8 +
  kernel/multikernel/kernfs.c   |   1 +
- kernel/multikernel/kho.c      | 116 +++----------
- kernel/multikernel/pci.c      | 137 +++++++++++++++
- 9 files changed, 558 insertions(+), 97 deletions(-)
+ kernel/multikernel/kho.c      | 123 +++-----------
+ kernel/multikernel/pci.c      | 136 +++++++++++++++
+ 9 files changed, 557 insertions(+), 105 deletions(-)
  create mode 100644 kernel/multikernel/pci.c
 
 diff --git a/include/linux/multikernel.h b/include/linux/multikernel.h
@@ -209,7 +209,7 @@ index feb570bd53cf..ac08a5062cd0 100644
  	ret = mk_instance_reserve_platform_devices(instance, config);
  	if (ret) {
 diff --git a/kernel/multikernel/dts.c b/kernel/multikernel/dts.c
-index e45c079b3232..d3cf7e646604 100644
+index e45c079b3232..ffc7a2dfb993 100644
 --- a/kernel/multikernel/dts.c
 +++ b/kernel/multikernel/dts.c
 @@ -17,6 +17,7 @@
@@ -402,7 +402,14 @@ index e45c079b3232..d3cf7e646604 100644
  
  	node_name = fdt_get_name(source_fdt, dev_node, NULL);
  
-@@ -257,6 +393,31 @@ static int mk_dt_parse_single_pci_device(const void *source_fdt, int dev_node,
+@@ -251,12 +387,38 @@ static int mk_dt_parse_single_pci_device(const void *source_fdt, int dev_node,
+ 		return -ENOMEM;
+ 	}
+ 
++	strscpy(pci_dev->name, device_name, sizeof(pci_dev->name));
+ 	pci_dev->vendor = (u16)fdt32_to_cpu(*vendor_prop);
+ 	pci_dev->device = (u16)fdt32_to_cpu(*device_prop);
+ 	pci_dev->domain = (u16)domain;
  	pci_dev->bus = (u8)bus;
  	pci_dev->slot = (u8)slot;
  	pci_dev->func = (u8)func;
@@ -434,7 +441,7 @@ index e45c079b3232..d3cf7e646604 100644
  
  	list_add_tail(&pci_dev->list, &config->pci_devices);
  	config->pci_device_count++;
-@@ -560,6 +721,16 @@ int mk_dt_parse(const void *dtb_data, size_t dtb_size,
+@@ -560,6 +722,16 @@ int mk_dt_parse(const void *dtb_data, size_t dtb_size,
  		return ret;
  	}
  
@@ -451,7 +458,7 @@ index e45c079b3232..d3cf7e646604 100644
  	ret = mk_dt_parse_devices(fdt, resources_node, config);
  	if (ret) {
  		pr_err("Failed to parse device resources: %d\n", ret);
-@@ -567,9 +738,10 @@ int mk_dt_parse(const void *dtb_data, size_t dtb_size,
+@@ -567,9 +739,10 @@ int mk_dt_parse(const void *dtb_data, size_t dtb_size,
  		return ret;
  	}
  
@@ -464,7 +471,7 @@ index e45c079b3232..d3cf7e646604 100644
  	return 0;
  }
  
-@@ -610,6 +782,17 @@ int mk_dt_parse_resources(const void *fdt, int resources_node,
+@@ -610,6 +783,17 @@ int mk_dt_parse_resources(const void *fdt, int resources_node,
  		return ret;
  	}
  
@@ -482,7 +489,7 @@ index e45c079b3232..d3cf7e646604 100644
  	ret = mk_dt_parse_devices(fdt, resources_node, config);
  	if (ret) {
  		pr_err("Failed to parse device resources for '%s': %d\n", instance_name, ret);
-@@ -617,10 +800,11 @@ int mk_dt_parse_resources(const void *fdt, int resources_node,
+@@ -617,10 +801,11 @@ int mk_dt_parse_resources(const void *fdt, int resources_node,
  		return ret;
  	}
  
@@ -496,7 +503,7 @@ index e45c079b3232..d3cf7e646604 100644
  	return 0;
  }
  
-@@ -816,6 +1000,7 @@ int mk_dt_get_property_size(const void *dtb_data, size_t dtb_size,
+@@ -816,6 +1001,7 @@ int mk_dt_get_property_size(const void *dtb_data, size_t dtb_size,
  void mk_dt_print_config(const struct mk_dt_config *config)
  {
  	struct mk_pci_device *pci_dev;
@@ -504,7 +511,7 @@ index e45c079b3232..d3cf7e646604 100644
  	struct mk_platform_device *plat_dev;
  
  	if (!config) {
-@@ -843,6 +1028,17 @@ void mk_dt_print_config(const struct mk_dt_config *config)
+@@ -843,6 +1029,17 @@ void mk_dt_print_config(const struct mk_dt_config *config)
  		pr_info("  CPU assignment: unavailable (allocation failed)\n");
  	}
  
@@ -522,7 +529,7 @@ index e45c079b3232..d3cf7e646604 100644
  	if (config->pci_devices_valid) {
  		if (config->pci_device_count == 0) {
  			pr_info("  PCI devices: none specified\n");
-@@ -877,6 +1073,67 @@ void mk_dt_print_config(const struct mk_dt_config *config)
+@@ -877,6 +1074,67 @@ void mk_dt_print_config(const struct mk_dt_config *config)
  	pr_info("  DTB: %zu bytes\n", config->dtb_size);
  }
  
@@ -590,7 +597,7 @@ index e45c079b3232..d3cf7e646604 100644
  /**
   * mk_dt_generate_instance_dtb() - Generate instance DTB from kernel data structures
   * @instance: Instance with transferred resources (CPUs, memory, devices)
-@@ -971,6 +1228,10 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
+@@ -971,6 +1229,10 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
  		if (ret) goto err_free;
  	}
  
@@ -601,7 +608,7 @@ index e45c079b3232..d3cf7e646604 100644
  	if ((instance->pci_devices_valid && instance->pci_device_count > 0) ||
  	    (instance->platform_devices_valid && instance->platform_device_count > 0)) {
  		ret = fdt_begin_node(fdt, "devices");
-@@ -982,6 +1243,40 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
+@@ -982,6 +1244,40 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
  			list_for_each_entry(pci_dev, &instance->pci_devices, list) {
  				char node_name[64];
  				char pci_id_str[32];
@@ -642,7 +649,7 @@ index e45c079b3232..d3cf7e646604 100644
  
  				snprintf(node_name, sizeof(node_name), "%s",
  					 pci_dev->name[0] ? pci_dev->name : "unnamed_pci");
-@@ -1003,6 +1298,11 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
+@@ -1003,6 +1299,11 @@ int mk_dt_generate_instance_dtb(struct mk_instance *instance,
  				ret = fdt_property_u32(fdt, "device-id", pci_dev->device);
  				if (ret) goto err_free;
  
@@ -686,7 +693,7 @@ index 5615e5b92114..a1cd5f24b2c8 100644
  	kref_init(&instance->refcount);
  
 diff --git a/kernel/multikernel/kho.c b/kernel/multikernel/kho.c
-index 010d44012b51..68d818f3926b 100644
+index 010d44012b51..05f46bf39651 100644
 --- a/kernel/multikernel/kho.c
 +++ b/kernel/multikernel/kho.c
 @@ -14,7 +14,6 @@
@@ -707,17 +714,29 @@ index 010d44012b51..68d818f3926b 100644
  	INIT_LIST_HEAD(&instance->platform_devices);
  	instance->platform_devices_valid = false;
  	instance->platform_device_count = 0;
-@@ -380,6 +382,9 @@ static int __init mk_kho_copy_pci_devices(const struct mk_dt_config *config,
- 		dst_dev->bus = src_dev->bus;
- 		dst_dev->slot = src_dev->slot;
- 		dst_dev->func = src_dev->func;
-+		memcpy(dst_dev->resources, src_dev->resources,
-+		       sizeof(dst_dev->resources));
-+		dst_dev->resources_valid = src_dev->resources_valid;
+@@ -368,19 +370,13 @@ static int __init mk_kho_copy_pci_devices(const struct mk_dt_config *config,
+ 	instance->pci_devices_valid = true;
  
+ 	list_for_each_entry(src_dev, &config->pci_devices, list) {
+-		dst_dev = kzalloc(sizeof(*dst_dev), GFP_KERNEL);
++		dst_dev = kmemdup(src_dev, sizeof(*dst_dev), GFP_KERNEL);
+ 		if (!dst_dev) {
+ 			pr_err("Failed to allocate PCI device entry\n");
+ 			return -ENOMEM;
+ 		}
+ 
+-		dst_dev->vendor = src_dev->vendor;
+-		dst_dev->device = src_dev->device;
+-		dst_dev->domain = src_dev->domain;
+-		dst_dev->bus = src_dev->bus;
+-		dst_dev->slot = src_dev->slot;
+-		dst_dev->func = src_dev->func;
+-
++		INIT_LIST_HEAD(&dst_dev->list);
  		list_add_tail(&dst_dev->list, &instance->pci_devices);
  		instance->pci_device_count++;
-@@ -389,6 +394,17 @@ static int __init mk_kho_copy_pci_devices(const struct mk_dt_config *config,
+ 	}
+@@ -389,6 +385,17 @@ static int __init mk_kho_copy_pci_devices(const struct mk_dt_config *config,
  	return 0;
  }
  
@@ -735,7 +754,7 @@ index 010d44012b51..68d818f3926b 100644
  static int __init mk_kho_copy_platform_devices(const struct mk_dt_config *config,
  					       struct mk_instance *instance)
  {
-@@ -675,6 +691,12 @@ int __init mk_kho_restore_dtbs(void)
+@@ -675,6 +682,12 @@ int __init mk_kho_restore_dtbs(void)
  		goto cleanup_devices;
  	}
  
@@ -748,7 +767,7 @@ index 010d44012b51..68d818f3926b 100644
  	ret = mk_kho_copy_platform_devices(&config, instance);
  	if (ret) {
  		pr_err("Failed to copy platform devices: %d\n", ret);
-@@ -701,6 +723,9 @@ int __init mk_kho_restore_dtbs(void)
+@@ -701,6 +714,9 @@ int __init mk_kho_restore_dtbs(void)
  	return 0;
  
  cleanup_devices:
@@ -758,7 +777,7 @@ index 010d44012b51..68d818f3926b 100644
  	if (instance->pci_devices_valid) {
  		struct mk_pci_device *pci_dev, *tmp_pci;
  		list_for_each_entry_safe(pci_dev, tmp_pci, &instance->pci_devices, list) {
-@@ -732,89 +757,6 @@ int __init mk_kho_restore_dtbs(void)
+@@ -732,89 +748,6 @@ int __init mk_kho_restore_dtbs(void)
  /* Run at early_initcall to enforce CPU restrictions before per-CPU allocations */
  early_initcall(mk_kho_restore_dtbs);
  
@@ -848,7 +867,7 @@ index 010d44012b51..68d818f3926b 100644
  bool mk_platform_device_allowed(const char *name, const char *hid)
  {
  	struct mk_platform_device *plat_dev;
-@@ -856,12 +798,6 @@ int __init mk_kho_restore_dtbs(void)
+@@ -856,12 +789,6 @@ int __init mk_kho_restore_dtbs(void)
  	return 0;
  }
  
@@ -863,10 +882,10 @@ index 010d44012b51..68d818f3926b 100644
  	return true;
 diff --git a/kernel/multikernel/pci.c b/kernel/multikernel/pci.c
 new file mode 100644
-index 000000000000..b430401085ef
+index 000000000000..2ddb47f2a177
 --- /dev/null
 +++ b/kernel/multikernel/pci.c
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,136 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Multikernel PCI assignment policy
@@ -926,7 +945,6 @@ index 000000000000..b430401085ef
 +		  *vendor, *device_id);
 +	return true;
 +}
-+EXPORT_SYMBOL_GPL(mk_pci_get_assigned_identity);
 +
 +void mk_pci_restore_resources(struct pci_dev *dev)
 +{
@@ -937,6 +955,7 @@ index 000000000000..b430401085ef
 +	if (!device || !device->resources_valid)
 +		return;
 +
++	dev->non_compliant_bars = true;
 +	for (i = 0; i < MK_PCI_RESOURCE_COUNT; i++) {
 +		dev->resource[i].start = device->resources[i].start;
 +		dev->resource[i].end = device->resources[i].end;
@@ -1003,7 +1022,6 @@ index 000000000000..b430401085ef
 +
 +	return false;
 +}
-+EXPORT_SYMBOL_GPL(mk_pci_should_probe);
 
 base-commit: 483192c3889ca357f8b9cdf5342e747dc456b8f1
 -- 

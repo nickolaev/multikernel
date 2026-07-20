@@ -1,4 +1,4 @@
-From e24e0d414f66de329d15a08aad00f2edcab04bf9 Mon Sep 17 00:00:00 2001
+From eb8c7b95d28d8ea052800cf4330148631b261e3e Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
 Date: Sun, 19 Jul 2026 03:01:31 +0300
 Subject: [PATCH 3/4] pci/multikernel: virtualize assigned config access
@@ -12,13 +12,13 @@ Remove multikernel branches from drivers/pci/probe.c.
 Signed-off-by: Nikolay Nikolaev <nicknickolaev@gmail.com>
 ---
  arch/x86/multikernel/pci.c  | 44 +++++++++++++++++++++++++++++++++++++
- drivers/pci/probe.c         |  9 --------
- include/linux/multikernel.h |  5 +++--
- kernel/multikernel/pci.c    | 37 ++++++++++++++++++++-----------
- 4 files changed, 71 insertions(+), 24 deletions(-)
+ drivers/pci/probe.c         | 11 ----------
+ include/linux/multikernel.h |  6 ++---
+ kernel/multikernel/pci.c    | 40 +++++++++++++++++++--------------
+ 4 files changed, 71 insertions(+), 30 deletions(-)
 
 diff --git a/arch/x86/multikernel/pci.c b/arch/x86/multikernel/pci.c
-index 1b2409ac8262..41d7d2c9d4f5 100644
+index 80bbc4344eee..9121921b10a1 100644
 --- a/arch/x86/multikernel/pci.c
 +++ b/arch/x86/multikernel/pci.c
 @@ -21,6 +21,47 @@ struct mk_mmcfg_snapshot {
@@ -69,7 +69,7 @@ index 1b2409ac8262..41d7d2c9d4f5 100644
  #ifdef CONFIG_PCI_MMCONFIG
  static int mk_mmcfg_snapshot_region(const struct pci_mmcfg_region *region,
  				    void *data)
-@@ -102,6 +143,9 @@ static int __init x86_multikernel_pci_arch_init(void)
+@@ -98,6 +139,9 @@ static int __init x86_multikernel_pci_arch_init(void)
  
  	raw_pci_ops = &pci_mmcfg;
  	raw_pci_ext_ops = &pci_mmcfg;
@@ -78,20 +78,22 @@ index 1b2409ac8262..41d7d2c9d4f5 100644
 +	pci_root_ops.write = mk_pci_write;
  	pr_notice("Multikernel selected ECAM for PCI config access\n");
  
- 	if (!root_instance->pci_devices_valid ||
+ 	return 0;
 diff --git a/drivers/pci/probe.c b/drivers/pci/probe.c
-index eed1f98d556f..b5a6ddc32bee 100644
+index eed1f98d556f..41183aed8f5d 100644
 --- a/drivers/pci/probe.c
 +++ b/drivers/pci/probe.c
-@@ -23,7 +23,6 @@
+@@ -22,9 +22,6 @@
+ #include <linux/irqdomain.h>
  #include <linux/pm_runtime.h>
  #include <linux/bitfield.h>
- #ifdef CONFIG_MULTIKERNEL
+-#ifdef CONFIG_MULTIKERNEL
 -#include <linux/multikernel.h>
- #endif
+-#endif
  #include "pci.h"
  
-@@ -2625,14 +2624,6 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
+ #define CARDBUS_LATENCY_TIMER	176	/* secondary latency timer */
+@@ -2625,14 +2622,6 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
  	struct pci_dev *dev;
  	u32 l;
  
@@ -107,18 +109,19 @@ index eed1f98d556f..b5a6ddc32bee 100644
  	 * Create pwrctrl device (if required) for the PCI device to handle the
  	 * power state. If the pwrctrl device is created, then skip scanning
 diff --git a/include/linux/multikernel.h b/include/linux/multikernel.h
-index 99b8f100e28b..4a9420c6e3bb 100644
+index 99b8f100e28b..9404f4d2fbc4 100644
 --- a/include/linux/multikernel.h
 +++ b/include/linux/multikernel.h
-@@ -15,6 +15,7 @@
+@@ -14,7 +14,7 @@
+ #include <linux/cpumask.h>
  #include <linux/genalloc.h>
  struct pci_bus;
- struct pci_dev;
+-struct pci_dev;
 +struct pci_ops;
  
  /**
   * Multikernel IPI interface
-@@ -852,10 +853,10 @@ void __init mk_register_cpus_from_kho(void);
+@@ -852,10 +852,10 @@ void __init mk_register_cpus_from_kho(void);
   *
   * Returns: true if probing should proceed, false to skip entirely
   */
@@ -132,7 +135,7 @@ index 99b8f100e28b..4a9420c6e3bb 100644
  /**
   * mk_platform_device_allowed() - Check if a platform device is allowed by DTB allowlist
 diff --git a/kernel/multikernel/pci.c b/kernel/multikernel/pci.c
-index b430401085ef..5fc3917cffda 100644
+index 2ddb47f2a177..acf949c7eb2c 100644
 --- a/kernel/multikernel/pci.c
 +++ b/kernel/multikernel/pci.c
 @@ -12,8 +12,7 @@
@@ -145,23 +148,29 @@ index b430401085ef..5fc3917cffda 100644
  {
  	struct mk_pci_device *device;
  	u16 domain = pci_domain_nr(bus);
-@@ -59,7 +58,7 @@ bool mk_pci_get_assigned_identity(struct pci_bus *bus, int devfn,
+@@ -52,13 +51,10 @@ bool mk_pci_get_assigned_identity(struct pci_bus *bus, int devfn,
+ 
+ 	*vendor = device->vendor;
+ 	*device_id = device->device;
+-	pr_notice("MK_SECONDARY_ASSIGNED_PCI_IDENTITY bdf=%04x:%02x:%02x.%x vendor=%04x device=%04x\n",
+-		  device->domain, device->bus, device->slot, device->func,
+-		  *vendor, *device_id);
+ 	return true;
  }
- EXPORT_SYMBOL_GPL(mk_pci_get_assigned_identity);
  
 -void mk_pci_restore_resources(struct pci_dev *dev)
 +static void mk_pci_restore_resources(struct pci_dev *dev)
  {
  	struct mk_pci_device *device;
  	int i;
-@@ -75,23 +74,33 @@ void mk_pci_restore_resources(struct pci_dev *dev)
+@@ -75,23 +71,33 @@ void mk_pci_restore_resources(struct pci_dev *dev)
  	}
  	pr_info("Restored PCI BAR resources for %s\n", pci_name(dev));
  }
 -EXPORT_SYMBOL_GPL(mk_pci_restore_resources);
  
 -static bool mk_pci_bridge_reaches_assigned(struct pci_bus *bus, int devfn)
-+DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, mk_pci_restore_resources);
++DECLARE_PCI_FIXUP_EARLY(PCI_ANY_ID, PCI_ANY_ID, mk_pci_restore_resources);
 +
 +static bool mk_pci_bridge_reaches_assigned(struct pci_bus *bus, int devfn,
 +					   const struct pci_ops *ops)
@@ -195,7 +204,7 @@ index b430401085ef..5fc3917cffda 100644
  	if (!secondary_bus || subordinate_bus < secondary_bus)
  		return false;
  
-@@ -108,18 +117,20 @@ static bool mk_pci_bridge_reaches_assigned(struct pci_bus *bus, int devfn)
+@@ -108,18 +114,20 @@ static bool mk_pci_bridge_reaches_assigned(struct pci_bus *bus, int devfn)
   * mk_pci_should_probe - Check whether PCI probing may access a location
   * @bus: PCI bus
   * @devfn: device/function number
@@ -218,7 +227,7 @@ index b430401085ef..5fc3917cffda 100644
  		return true;
  	if (!root_instance->pci_devices_valid ||
  	    !root_instance->pci_device_count)
-@@ -129,7 +140,7 @@ bool mk_pci_should_probe(struct pci_bus *bus, int devfn)
+@@ -129,7 +137,7 @@ bool mk_pci_should_probe(struct pci_bus *bus, int devfn)
  
  	list_for_each_entry(device, &root_instance->pci_devices, list) {
  		if (device->domain == domain && device->bus > bus->number)

@@ -1,4 +1,4 @@
-From 19541b3407ad2370852c2b420208cc2818046cf5 Mon Sep 17 00:00:00 2001
+From 13527565ff0bf7cec9179e44acc90c81d1889b05 Mon Sep 17 00:00:00 2001
 From: Nikolay Nikolaev <nicknickolaev@gmail.com>
 Date: Sun, 19 Jul 2026 03:01:43 +0300
 Subject: [PATCH 4/4] x86/multikernel: isolate LAPIC timer policy
