@@ -4,7 +4,8 @@
 	branch = sriov-vf-assignment
 [submodule "kerf"]
 	path = kerf
-	url = https://github.com/multikernel/kerf.git
+	url = https://github.com/nickolaev/kerf.git
+	branch = sriov-vf-assignment
 [submodule "lazy_cma"]
 	path = lazy_cma
 	url = https://github.com/multikernel/lazy_cma.git
