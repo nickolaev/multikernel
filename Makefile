@@ -9,7 +9,7 @@ KBUILD_DIR := $(BUILD_DIR)/kernel
 HOST_DEPS := $(BUILD_DIR)/host-deps/root
 KERF_RUNTIME := $(BUILD_DIR)/kerf-runtime
 LAZY_CMA_BUILD := $(BUILD_DIR)/lazy-cma
-KERF_PYTHON_SOURCES := $(shell find '$(KERF_DIR)/src/kerf' -type f -name '*.py')
+KERF_PYTHON_SOURCES := $(shell find '$(KERF_DIR)/src/kerf' -type f -name '*.py' 2>/dev/null)
 LAZY_CMA_SOURCES := $(LAZY_CMA_DIR)/lazy_cma.c $(LAZY_CMA_DIR)/lazy_cma_tool.c $(LAZY_CMA_DIR)/version.h
 JOBS ?= $(shell nproc)
 CC ?= cc
@@ -30,11 +30,16 @@ all: build
 
 help:
 	@printf '%s\n' \
-	  'make build   - build the minimal kernel and both initramfs images' \
-	  'make run     - run QEMU interactively on the serial console' \
-	  'make test    - run QEMU with a timeout and assert all proof markers' \
-	  'make config  - regenerate the out-of-tree minimal kernel config' \
-	  'make clean   - remove only the top-level build directory'
+	  'make preflight    - validate submodules, tools, branch, and QEMU settings' \
+	  'make config       - generate and validate the minimal kernel config' \
+	  'make kernel       - build the kernel and modules' \
+	  'make kerf-runtime - assemble the Kerf/Python guest runtime' \
+	  'make lazy-cma     - build the contiguous-memory module and helper' \
+	  'make initrd       - build the host and secondary initramfs images' \
+	  'make build        - build all required artifacts' \
+	  'make run          - run QEMU interactively on the serial console' \
+	  'make test         - run QEMU and assert all proof markers' \
+	  'make clean        - remove only the top-level build directory'
 
 preflight:
 	@LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' LAZY_CMA_DIR='$(LAZY_CMA_DIR)' BUSYBOX='$(BUSYBOX)' \
