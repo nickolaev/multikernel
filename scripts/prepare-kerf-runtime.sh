@@ -4,12 +4,11 @@ set -euo pipefail
 kerf_dir=${1:?usage: prepare-kerf-runtime.sh KERF_DIR BUILD_DIR PYTHON}
 build_dir=${2:?missing build directory}
 python=${3:?missing Python interpreter}
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 runtime="${build_dir}/kerf-runtime"
 packages="${build_dir}/kerf-packages"
 
 case "${runtime}" in
-	*/build/kerf-runtime) ;;
+	*/build/*/kerf-runtime) ;;
 	*) printf 'refusing unsafe runtime path: %s\n' "${runtime}" >&2; exit 1 ;;
 esac
 
@@ -32,9 +31,6 @@ rm -rf -- "${runtime}/usr/lib/${py_version}/ensurepip" \
 
 cp -a "${click_dir}" "${site_dir}/click"
 cp -a "${kerf_dir}/src/kerf" "${site_dir}/kerf"
-"${python}" -m pip install --disable-pip-version-check --no-deps \
-	--target "${site_dir}" 'rdtsc==0.2.1'
-install -m 0644 "${root}/scripts/rdtsc-init.py" "${site_dir}/rdtsc/__init__.py"
 
 (
 	cd "${packages}"
@@ -56,7 +52,7 @@ for library in "${!libraries[@]}"; do
 done
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="${runtime}/usr" PYTHONPATH="${site_dir}" \
-	"${runtime}/usr/bin/python3" -c 'import click, kerf.cli, libfdt, rdtsc'
+	"${runtime}/usr/bin/python3" -c 'import click, kerf.cli, libfdt'
 find "${runtime}" -type d -name __pycache__ -prune -exec rm -rf -- {} +
 touch "${runtime}/.ready"
 printf 'MK_KERF_RUNTIME_OK python=%s bytes=%s\n' \

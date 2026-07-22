@@ -101,7 +101,7 @@ $(KERNEL): $(KBUILD_DIR)/.config $(HOST_DEPS)/.ready FORCE
 
 kernel: $(KERNEL)
 
-$(KERF_RUNTIME)/.ready: $(ROOT)/scripts/prepare-kerf-runtime.sh $(ROOT)/scripts/rdtsc-init.py | preflight
+$(KERF_RUNTIME)/.ready: $(ROOT)/scripts/prepare-kerf-runtime.sh | preflight
 	PLATFORM='$(PLATFORM)' '$<' '$(KERF_DIR)' '$(BUILD_DIR)' '$(PYTHON)'
 
 kerf-runtime: $(KERF_RUNTIME)/.ready
