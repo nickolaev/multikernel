@@ -4,6 +4,11 @@ set -euo pipefail
 kerf_dir=${1:?usage: prepare-kerf-runtime.sh KERF_DIR BUILD_DIR PYTHON}
 build_dir=${2:?missing build directory}
 python=${3:?missing Python interpreter}
+platform=${PLATFORM:-x86}
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ "${platform}" == riscv ]]; then
+	exec "${root}/scripts/prepare-riscv-runtime.sh" "${kerf_dir}" "${build_dir}"
+fi
 runtime="${build_dir}/kerf-runtime"
 packages="${build_dir}/kerf-packages"
 

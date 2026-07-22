@@ -1,0 +1,83 @@
+#!/bin/sh
+
+PATH=/bin:/sbin
+PYTHONHOME=/usr
+PYTHONPATH=/usr/lib/python3/dist-packages
+PYTHONDONTWRITEBYTECODE=1
+export PATH
+export PYTHONHOME PYTHONPATH PYTHONDONTWRITEBYTECODE
+
+kerf()
+{
+	/usr/bin/python3 -m kerf.cli "$@"
+}
+
+fail()
+{
+	printf 'MK_DEMO_FAIL stage=%s\n' "$1"
+	sync
+	poweroff -f
+	while :; do sleep 1; done
+}
+
+expect_status()
+{
+	expected=$1
+	status_file=/sys/fs/multikernel/instances/qemu-demo/status
+	attempt=0
+	while [ "$attempt" -lt 50 ]; do
+		actual=$(cat "$status_file" 2>/dev/null || true)
+		if [ "$actual" = "$expected" ]; then
+			printf 'MK_STAGE_STATUS_%s id=1\n' "$expected"
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		sleep 1
+	done
+	printf 'MK_STATUS_MISMATCH expected=%s actual=%s\n' "$expected" "$actual"
+	return 1
+}
+
+mount -t proc proc /proc || fail mount-proc
+mount -t sysfs sysfs /sys || fail mount-sysfs
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+grep -q 'Multikernel Memory Pool' /proc/iomem || fail pool-reservation
+printf 'MK_STAGE_POOL_OK size=512M base=0xc0000000\n'
+
+boot_line=$(/bin/busybox dmesg | /bin/busybox grep -m1 '^Booting Linux on hartid ')
+boot_hart=${boot_line##* }
+guest_hart=
+for candidate in 0 1 2 3; do
+	if [ "$candidate" != "$boot_hart" ]; then
+		guest_hart=$candidate
+		break
+	fi
+done
+[ -n "$guest_hart" ] || fail guest-hart-selection
+printf 'MK_STAGE_HART_SELECTED boot=%s guest=%s\n' "$boot_hart" "$guest_hart"
+
+kerf init --cpus="$guest_hart" || fail kerf-init
+printf 'MK_STAGE_KERF_INIT_OK cpu=%s memory=512M\n' "$guest_hart"
+kerf create qemu-demo --id=1 --cpus="$guest_hart" --memory=256MB \
+	--memory-base=0xc0000000 || fail kerf-create
+printf 'MK_STAGE_KERF_CREATE_OK id=1\n'
+expect_status ready || fail status-ready
+
+kerf load qemu-demo --kernel=/payload/vmlinux \
+	--initrd=/payload/secondary-initrd.cpio.gz \
+	--cmdline='rdinit=/init earlycon=sbi console=ttyS0 loglevel=7 panic=-1 kho=on nr_cpus=1' || fail kerf-load
+printf 'MK_STAGE_KERF_LOAD_OK id=1\n'
+expect_status loaded || fail status-loaded
+
+kerf exec qemu-demo || fail kerf-exec
+printf 'MK_STAGE_KERF_EXEC_OK id=1\n'
+expect_status active || fail status-active
+
+sleep 30
+actual=$(cat /sys/fs/multikernel/instances/qemu-demo/status 2>/dev/null || true)
+[ "$actual" = active ] || fail status-active-after-wait
+printf '<6>MK_PRIMARY_STILL_ALIVE instance=0 secondary_status=%s\n' "$actual" >/dev/kmsg
+sync
+poweroff -f
+while :; do sleep 1; done

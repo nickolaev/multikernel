@@ -9,7 +9,7 @@ build_dir=$(cd "$(dirname "${output}")" && pwd)
 root="${build_dir}/initramfs-${mode}"
 
 case "${root}" in
-	*/build/initramfs-host|*/build/initramfs-secondary) ;;
+	*/build/*/initramfs-host|*/build/*/initramfs-secondary) ;;
 	*) printf 'refusing unsafe staging path: %s\n' "${root}" >&2; exit 1 ;;
 esac
 

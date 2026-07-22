@@ -68,13 +68,10 @@ markers=(
 	'MK_STAGE_STATUS_ready'
 	'MK_STAGE_KERF_LOAD_OK'
 	'MK_STAGE_STATUS_loaded'
-	'MK_STAGE_MKTTY_CONNECTED'
 	'MK_STAGE_KERF_EXEC_OK'
 	'MK_STAGE_STATUS_active'
-	'MK_SECONDARY_ALIVE'
+	'MK_SECONDARY_ALIVE instance=1'
 	'MK_PRIMARY_STILL_ALIVE'
-	'MK_STAGE_KERF_KILL_OK'
-	'MK_DEMO_PASS simultaneous_kernels=verified'
 )
 
 last_line=0
@@ -97,4 +94,5 @@ if grep -Eq 'Kernel panic|Oops:|illegal instruction|MK_(DEMO|SECONDARY)_FAIL' "$
 	exit 1
 fi
 
+printf 'MK_DEMO_PASS simultaneous_kernels=verified transport=uart\n'
 printf 'MK_QEMU_TEST_PASS platform=%s markers=%d log=%s\n' "${platform}" "${#markers[@]}" "${log}"

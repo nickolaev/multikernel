@@ -36,18 +36,26 @@ QEMU ?= $(shell command -v qemu-system-x86_64 2>/dev/null)
 QEMU_MACHINE := q35,accel=tcg
 QEMU_CPU := max
 QEMU_APPEND := console=ttyS0,115200 rdinit=/init panic=-1 mkkernel_pool=512M@0x40000000 kho=on
+GUEST_BUSYBOX := $(BUSYBOX)
+HOST_INIT := $(ROOT)/initramfs/host-init
+SECONDARY_INIT := $(ROOT)/initramfs/secondary-init
+BASELINE_DTS := $(ROOT)/initramfs/baseline.dts
 else
 KARCH := riscv
 CROSS_COMPILE ?= riscv64-linux-gnu-
 KCONFIG_FRAGMENT := $(ROOT)/config/multikernel-qemu-riscv.config
-KERNEL := $(KBUILD_DIR)/vmlinux
-SECONDARY_KERNEL := $(KERNEL)
-KERNEL_TARGET := vmlinux
+KERNEL := $(KBUILD_DIR)/arch/riscv/boot/Image
+SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
+KERNEL_TARGET := Image
 KBUILD_PLATFORM_FLAGS := ARCH=$(KARCH) CROSS_COMPILE=$(CROSS_COMPILE)
 QEMU ?= $(shell command -v qemu-system-riscv64 2>/dev/null)
 QEMU_MACHINE := virt,accel=tcg
-QEMU_CPU := rv64
+QEMU_CPU := max
 QEMU_APPEND := console=ttyS0 rdinit=/init panic=-1 mkkernel_pool=512M@0xc0000000 kho=on
+GUEST_BUSYBOX := $(KERF_RUNTIME)/usr/bin/busybox
+HOST_INIT := $(ROOT)/initramfs/host-init-riscv
+SECONDARY_INIT := $(ROOT)/initramfs/secondary-init-riscv
+BASELINE_DTS := $(ROOT)/initramfs/baseline-riscv.dts
 endif
 
 .PHONY: all preflight config kernel kerf-runtime initrd build run test show-platform clean help FORCE
@@ -106,12 +114,12 @@ $(KERF_RUNTIME)/.ready: $(ROOT)/scripts/prepare-kerf-runtime.sh | preflight
 
 kerf-runtime: $(KERF_RUNTIME)/.ready
 
-$(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-initramfs.sh | preflight
-	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<'
+$(SECONDARY_INITRD): $(SECONDARY_INIT) $(ROOT)/scripts/build-initramfs.sh $(KERF_RUNTIME)/.ready | preflight
+	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(GUEST_BUSYBOX)' '$<'
 
-$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(ROOT)/initramfs/baseline.dts $(ROOT)/scripts/build-initramfs.sh
-	PLATFORM='$(PLATFORM)' '$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
-		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' '$(ROOT)/initramfs/baseline.dts'
+$(HOST_INITRD): $(HOST_INIT) $(KERF_RUNTIME)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(BASELINE_DTS) $(ROOT)/scripts/build-initramfs.sh
+	PLATFORM='$(PLATFORM)' '$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(GUEST_BUSYBOX)' '$<' \
+		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' '$(BASELINE_DTS)'
 
 initrd: $(SECONDARY_INITRD) $(HOST_INITRD)
 
