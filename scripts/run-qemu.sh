@@ -14,7 +14,13 @@ cpu=${QEMU_CPU:?QEMU_CPU is required}
 append=${QEMU_APPEND:?QEMU_APPEND is required}
 cpus=${QEMU_CPUS:-4}
 memory_mb=${QEMU_MEMORY_MB:-2048}
-timeout_seconds=${QEMU_TIMEOUT:-180}
+if [[ -n ${QEMU_TIMEOUT:-} ]]; then
+	timeout_seconds=${QEMU_TIMEOUT}
+elif [[ ${platform} == riscv ]]; then
+	timeout_seconds=480
+else
+	timeout_seconds=180
+fi
 
 [[ "${mode}" == run || "${mode}" == test ]] || { printf 'unknown mode: %s\n' "${mode}" >&2; exit 1; }
 [[ "${platform}" == x86 || "${platform}" == riscv ]] || { printf 'unknown platform: %s\n' "${platform}" >&2; exit 1; }
@@ -68,6 +74,7 @@ markers=(
 	'MK_STAGE_STATUS_ready'
 	'MK_STAGE_KERF_LOAD_OK'
 	'MK_STAGE_STATUS_loaded'
+	'MK_STAGE_MKTTY_CONNECTED'
 	'MK_STAGE_KERF_EXEC_OK'
 	'MK_STAGE_STATUS_active'
 	'MK_SECONDARY_ALIVE instance=1'
@@ -94,5 +101,5 @@ if grep -Eq 'Kernel panic|Oops:|illegal instruction|MK_(DEMO|SECONDARY)_FAIL' "$
 	exit 1
 fi
 
-printf 'MK_DEMO_PASS simultaneous_kernels=verified transport=uart\n'
+printf 'MK_DEMO_PASS simultaneous_kernels=verified transport=mktty\n'
 printf 'MK_QEMU_TEST_PASS platform=%s markers=%d log=%s\n' "${platform}" "${#markers[@]}" "${log}"

@@ -66,15 +66,42 @@ expect_status ready || fail status-ready
 
 kerf load qemu-demo --kernel=/payload/vmlinux \
 	--initrd=/payload/secondary-initrd.cpio.gz \
-	--cmdline='rdinit=/init earlycon=sbi console=ttyS0 loglevel=7 panic=-1 kho=on nr_cpus=1' || fail kerf-load
+	--cmdline='rdinit=/init panic=-1 kho=on nr_cpus=1' \
+	--console=mktty0 || fail kerf-load
 printf 'MK_STAGE_KERF_LOAD_OK id=1\n'
 expect_status loaded || fail status-loaded
+
+exec 3<>/dev/mktty || fail mktty-open
+printf '1\n' >&3 || fail mktty-select
+printf 'MK_STAGE_MKTTY_CONNECTED id=1\n'
 
 kerf exec qemu-demo || fail kerf-exec
 printf 'MK_STAGE_KERF_EXEC_OK id=1\n'
 expect_status active || fail status-active
 
-sleep 30
+marker_file=/mktty-success
+while IFS= read -r line; do
+	printf 'MK_SECONDARY_STREAM:%s\n' "$line"
+	case "$line" in
+		*MK_SECONDARY_ALIVE*) touch "$marker_file"; break ;;
+	esac
+done <&3 &
+reader_pid=$!
+attempt=0
+while [ "$attempt" -lt 240 ] && [ ! -e "$marker_file" ]; do
+	attempt=$((attempt + 1))
+	sleep 1
+done
+kill "$reader_pid" 2>/dev/null || true
+if [ ! -e "$marker_file" ]; then
+	printf '<6>MK_DIAG_BOOT:%s\n' \
+		"$(cat /sys/fs/multikernel/instances/qemu-demo/boot 2>/dev/null || true)" >/dev/kmsg
+	while IFS= read -r line; do
+		printf '<6>MK_DIAG_IPI:%s\n' "$line" >/dev/kmsg
+	done </sys/fs/multikernel/instances/qemu-demo/ipi
+	fail secondary-marker
+fi
+
 actual=$(cat /sys/fs/multikernel/instances/qemu-demo/status 2>/dev/null || true)
 [ "$actual" = active ] || fail status-active-after-wait
 printf '<6>MK_PRIMARY_STILL_ALIVE instance=0 secondary_status=%s\n' "$actual" >/dev/kmsg
