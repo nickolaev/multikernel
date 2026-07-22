@@ -2,32 +2,39 @@
 set -euo pipefail
 
 mode=${1:?usage: run-qemu.sh run|test}
+platform=${PLATFORM:?PLATFORM is required}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-build_dir=${BUILD_DIR:-"${root}/build"}
-kernel="${build_dir}/kernel/arch/x86/boot/bzImage"
+build_dir=${BUILD_DIR:-"${root}/build/${platform}"}
+kernel=${KERNEL:?KERNEL is required}
 initrd="${build_dir}/host-initrd.cpio.gz"
 log="${build_dir}/qemu-serial.log"
-qemu=${QEMU:-qemu-system-x86_64}
+qemu=${QEMU:?QEMU is required}
+machine=${QEMU_MACHINE:?QEMU_MACHINE is required}
+cpu=${QEMU_CPU:?QEMU_CPU is required}
+append=${QEMU_APPEND:?QEMU_APPEND is required}
 cpus=${QEMU_CPUS:-4}
 memory_mb=${QEMU_MEMORY_MB:-2048}
 timeout_seconds=${QEMU_TIMEOUT:-180}
 
 [[ "${mode}" == run || "${mode}" == test ]] || { printf 'unknown mode: %s\n' "${mode}" >&2; exit 1; }
+[[ "${platform}" == x86 || "${platform}" == riscv ]] || { printf 'unknown platform: %s\n' "${platform}" >&2; exit 1; }
 [[ "${cpus}" =~ ^[0-9]+$ && "${memory_mb}" =~ ^[0-9]+$ && "${timeout_seconds}" =~ ^[0-9]+$ ]] || {
 	printf 'QEMU tunables must be numeric\n' >&2
 	exit 1
 }
 (( cpus >= 3 )) || { printf 'QEMU_CPUS must be at least 3\n' >&2; exit 1; }
 (( memory_mb >= 1536 )) || { printf 'QEMU_MEMORY_MB must be at least 1536\n' >&2; exit 1; }
+[[ -f "${kernel}" ]] || { printf 'kernel not found: %s\n' "${kernel}" >&2; exit 1; }
+[[ -f "${initrd}" ]] || { printf 'initrd not found: %s\n' "${initrd}" >&2; exit 1; }
 
 args=(
-	-machine q35,accel=tcg
-	-cpu max
+	-machine "${machine}"
+	-cpu "${cpu}"
 	-smp "${cpus}"
 	-m "${memory_mb}"
 	-kernel "${kernel}"
 	-initrd "${initrd}"
-	-append 'console=ttyS0,115200 rdinit=/init panic=-1 mkkernel_pool=512M@0x40000000 kho=on'
+	-append "${append}"
 	-nographic
 	-monitor none
 	-no-reboot
@@ -39,7 +46,7 @@ fi
 
 mkdir -p "${build_dir}"
 : >"${log}"
-printf 'MK_QEMU_START timeout=%ss log=%s\n' "${timeout_seconds}" "${log}"
+printf 'MK_QEMU_START platform=%s timeout=%ss kernel=%s log=%s\n' "${platform}" "${timeout_seconds}" "${kernel}" "${log}"
 set +e
 timeout --foreground "${timeout_seconds}" "${qemu}" "${args[@]}" 2>&1 | tee "${log}"
 qemu_status=${PIPESTATUS[0]}
@@ -70,15 +77,24 @@ markers=(
 	'MK_DEMO_PASS simultaneous_kernels=verified'
 )
 
+last_line=0
 for marker in "${markers[@]}"; do
-	grep -Fq "${marker}" "${log}" || {
+	line=$(grep -n -F -m1 "${marker}" "${log}" | cut -d: -f1 || true)
+	[[ -n "${line}" ]] || {
 		printf 'MK_QEMU_FAIL reason=missing-marker marker=%q log=%s\n' "${marker}" "${log}" >&2
 		exit 1
 	}
+	(( line > last_line )) || {
+		printf 'MK_QEMU_FAIL reason=marker-order marker=%q line=%d previous=%d log=%s\n' \
+			"${marker}" "${line}" "${last_line}" "${log}" >&2
+		exit 1
+	}
+	last_line=${line}
 done
-if grep -Fq 'MK_DEMO_FAIL' "${log}"; then
-	printf 'MK_QEMU_FAIL reason=guest-failure-marker log=%s\n' "${log}" >&2
+
+if grep -Eq 'Kernel panic|Oops:|illegal instruction|MK_(DEMO|SECONDARY)_FAIL' "${log}"; then
+	printf 'MK_QEMU_FAIL reason=fatal-guest-output log=%s\n' "${log}" >&2
 	exit 1
 fi
 
-printf 'MK_QEMU_TEST_PASS markers=%d log=%s\n' "${#markers[@]}" "${log}"
+printf 'MK_QEMU_TEST_PASS platform=%s markers=%d log=%s\n' "${platform}" "${#markers[@]}" "${log}"
