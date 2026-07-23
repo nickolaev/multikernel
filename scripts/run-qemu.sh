@@ -17,7 +17,7 @@ memory_mb=${QEMU_MEMORY_MB:-2048}
 if [[ -n ${QEMU_TIMEOUT:-} ]]; then
 	timeout_seconds=${QEMU_TIMEOUT}
 elif [[ ${platform} == riscv ]]; then
-	timeout_seconds=480
+	timeout_seconds=1200
 else
 	timeout_seconds=180
 fi
@@ -78,8 +78,18 @@ markers=(
 	'MK_STAGE_KERF_EXEC_OK'
 	'MK_STAGE_STATUS_active'
 	'MK_SECONDARY_ALIVE instance=1'
-	'MK_PRIMARY_STILL_ALIVE'
 )
+
+if [[ ${platform} == riscv ]]; then
+	markers+=(
+		'MK_STAGE_FORCE_HALT_UNSUPPORTED'
+		'MK_STAGE_GRACEFUL_HALT_OK cycle=1'
+		'MK_STAGE_RESPAWN_OK cycle=1'
+		'MK_STAGE_GRACEFUL_HALT_OK cycle=2'
+		'MK_STAGE_RESPAWN_OK cycle=2'
+	)
+fi
+markers+=('MK_PRIMARY_STILL_ALIVE')
 
 last_line=0
 for marker in "${markers[@]}"; do

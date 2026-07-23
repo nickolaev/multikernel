@@ -23,7 +23,7 @@ PYTHON ?= $(shell command -v python3 2>/dev/null)
 BUSYBOX ?= $(shell command -v busybox 2>/dev/null)
 LEX := $(shell command -v flex 2>/dev/null)
 YACC := $(shell command -v bison 2>/dev/null)
-HOST_LIBDIR ?= /usr/lib/x86_64-linux-gnu
+HOST_LIBDIR ?= $(HOST_DEPS)/usr/lib/x86_64-linux-gnu
 
 ifeq ($(PLATFORM),x86)
 KARCH := x86

@@ -38,6 +38,35 @@ expect_status()
 	return 1
 }
 
+wait_secondary()
+{
+	cycle=$1
+	marker_file="/mktty-success-$cycle"
+	rm -f "$marker_file"
+	while IFS= read -r line; do
+		printf 'MK_SECONDARY_STREAM:%s\n' "$line"
+		case "$line" in
+			*MK_SECONDARY_ALIVE*) touch "$marker_file"; break ;;
+		esac
+	done <&3 &
+	reader_pid=$!
+	attempt=0
+	while [ "$attempt" -lt 600 ] && [ ! -e "$marker_file" ]; do
+		attempt=$((attempt + 1))
+		sleep 1
+	done
+	kill "$reader_pid" 2>/dev/null || true
+	if [ ! -e "$marker_file" ]; then
+		printf '<6>MK_DIAG_BOOT:%s\n' \
+			"$(cat /sys/fs/multikernel/instances/qemu-demo/boot 2>/dev/null || true)" >/dev/kmsg
+		while IFS= read -r line; do
+			printf '<6>MK_DIAG_IPI:%s\n' "$line" >/dev/kmsg
+		done </sys/fs/multikernel/instances/qemu-demo/ipi
+		fail "secondary-marker-$cycle"
+	fi
+	printf 'MK_STAGE_SECONDARY_ALIVE cycle=%s\n' "$cycle"
+}
+
 mount -t proc proc /proc || fail mount-proc
 mount -t sysfs sysfs /sys || fail mount-sysfs
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
@@ -79,32 +108,30 @@ kerf exec qemu-demo || fail kerf-exec
 printf 'MK_STAGE_KERF_EXEC_OK id=1\n'
 expect_status active || fail status-active
 
-marker_file=/mktty-success
-while IFS= read -r line; do
-	printf 'MK_SECONDARY_STREAM:%s\n' "$line"
-	case "$line" in
-		*MK_SECONDARY_ALIVE*) touch "$marker_file"; break ;;
-	esac
-done <&3 &
-reader_pid=$!
-attempt=0
-while [ "$attempt" -lt 240 ] && [ ! -e "$marker_file" ]; do
-	attempt=$((attempt + 1))
-	sleep 1
-done
-kill "$reader_pid" 2>/dev/null || true
-if [ ! -e "$marker_file" ]; then
-	printf '<6>MK_DIAG_BOOT:%s\n' \
-		"$(cat /sys/fs/multikernel/instances/qemu-demo/boot 2>/dev/null || true)" >/dev/kmsg
-	while IFS= read -r line; do
-		printf '<6>MK_DIAG_IPI:%s\n' "$line" >/dev/kmsg
-	done </sys/fs/multikernel/instances/qemu-demo/ipi
-	fail secondary-marker
+wait_secondary 0
+
+if kerf kill --force qemu-demo >/tmp/force-halt.log 2>&1; then
+	cat /tmp/force-halt.log
+	fail force-halt-unexpected-success
 fi
+cat /tmp/force-halt.log
+expect_status active || fail force-halt-state
+printf 'MK_STAGE_FORCE_HALT_UNSUPPORTED id=1\n'
+
+for cycle in 1 2; do
+	kerf kill qemu-demo || fail "graceful-halt-$cycle"
+	expect_status loaded || fail "status-loaded-$cycle"
+	printf 'MK_STAGE_GRACEFUL_HALT_OK cycle=%s\n' "$cycle"
+
+	kerf exec qemu-demo || fail "respawn-$cycle"
+	expect_status active || fail "status-active-$cycle"
+	wait_secondary "$cycle"
+	printf 'MK_STAGE_RESPAWN_OK cycle=%s\n' "$cycle"
+done
 
 actual=$(cat /sys/fs/multikernel/instances/qemu-demo/status 2>/dev/null || true)
 [ "$actual" = active ] || fail status-active-after-wait
-printf '<6>MK_PRIMARY_STILL_ALIVE instance=0 secondary_status=%s\n' "$actual" >/dev/kmsg
+printf '<6>MK_PRIMARY_STILL_ALIVE instance=0 secondary_status=%s respawns=2\n' "$actual" >/dev/kmsg
 sync
 poweroff -f
 while :; do sleep 1; done
