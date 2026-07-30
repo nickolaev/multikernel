@@ -20,7 +20,10 @@ fi
 	printf 'host dependency bootstrap: gelf.h was not extracted\n' >&2
 	exit 1
 }
-system_libelf=$(ldconfig -p | awk '/libelf\.so\.1 \(/{print $NF; exit}')
+system_libelf=$(ldconfig -p | awk '
+	/libelf\.so\.1 \(/ && !path { path = $NF }
+	END { print path }
+')
 [[ -n "${system_libelf}" && -f "${system_libelf}" ]] || {
 	printf 'host dependency bootstrap: system libelf.so.1 was not found\n' >&2
 	exit 1

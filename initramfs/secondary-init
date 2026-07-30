@@ -50,6 +50,21 @@ if [ -c /dev/mktty0 ]; then
 	else
 		printf 'MK_SECONDARY_FAIL reason=pf-visible bdf=0000:00:02.0\n' >/dev/mktty0
 	fi
+	pci_count=0
+	unexpected_bdf=
+	for pci_path in /sys/bus/pci/devices/*; do
+		[ -e "$pci_path" ] || continue
+		pci_bdf=${pci_path##*/}
+		pci_count=$((pci_count + 1))
+		[ "$pci_bdf" = "$vf_bdf" ] || unexpected_bdf=$pci_bdf
+	done
+	if [ "$pci_count" -eq 1 ] && [ -z "$unexpected_bdf" ]; then
+		printf 'MK_SECONDARY_PCI_ISOLATED instance=1 devices=1 vf=%s\n' \
+			"$vf_bdf" >/dev/mktty0
+	else
+		printf 'MK_SECONDARY_FAIL reason=pci-scope devices=%s unexpected=%s\n' \
+			"$pci_count" "$unexpected_bdf" >/dev/mktty0
+	fi
 	driver=$(/bin/busybox readlink "$vf_path/driver" 2>/dev/null || true)
 	vf_netdev=
 	vf_ready=0

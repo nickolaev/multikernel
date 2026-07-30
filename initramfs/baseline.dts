@@ -3,7 +3,7 @@
 / {
 	compatible = "multikernel-v1";
 	resources {
-		cpus = <2>;
+		cpus = <2 3>;
 		memory-base = <@MEMORY_BASE@>;
 		memory-bytes = <0x20000000>;
 		pci-host-bridges {
@@ -14,6 +14,14 @@
 			};
 		};
 		devices {
+			igbpf0 {
+				device-type = "pci";
+				compatible = "intel,igb";
+				pci-id = "@PF_BDF@";
+				vendor-id = <0x@PF_VENDOR@>;
+				device-id = <0x@PF_DEVICE@>;
+			};
+
 			igbvf0 {
 				device-type = "pci";
 				compatible = "intel,igbvf";

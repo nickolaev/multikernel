@@ -82,7 +82,7 @@ make test QEMU_TIMEOUT=240
 make test QEMU_CPUS=6 QEMU_MEMORY_MB=8192
 ```
 
-The defaults are QEMU TCG, four CPUs, 6144 MiB of RAM, and a 180-second test
+The defaults are QEMU TCG, four CPUs, 6144 MiB of RAM, and a 300-second test
 timeout. At least three CPUs and 5120 MiB are required. Instance 1 receives CPU
 2 and 256 MiB from a 512 MiB pool allocated at boot.
 
