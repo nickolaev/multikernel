@@ -3,9 +3,25 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 EVENT_PREFIX = "MK_EVENT "
+_KERNEL_CONSOLE_RECORD = re.compile(
+    r"\[\s*\d+\.\d+\] [^\r\n]*(?:\r?\n|$)"
+)
+
+
+def _validate_event(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ValueError("event payload is not an object")
+    if not isinstance(payload.get("event"), str):
+        raise ValueError("event name is missing")
+    if not isinstance(payload.get("source"), str):
+        raise ValueError("event source is missing")
+    if not isinstance(payload.get("fields"), dict):
+        raise ValueError("event fields are missing")
+    return payload
 
 
 def format_marker(event: str, fields: dict[str, object]) -> str:
@@ -39,18 +55,24 @@ def decode_event(line: str) -> dict[str, object]:
     if offset < 0:
         raise ValueError("event prefix is missing")
     payload = json.loads(line[offset + len(EVENT_PREFIX) :])
-    if not isinstance(payload, dict):
-        raise ValueError("event payload is not an object")
-    if not isinstance(payload.get("event"), str):
-        raise ValueError("event name is missing")
-    if not isinstance(payload.get("source"), str):
-        raise ValueError("event source is missing")
-    if not isinstance(payload.get("fields"), dict):
-        raise ValueError("event fields are missing")
-    return payload
+    return _validate_event(payload)
 
 
 def iter_events(text: str):
-    for line in text.splitlines():
-        if EVENT_PREFIX in line:
-            yield decode_event(line)
+    """Yield events while tolerating timestamped kernel-console insertion."""
+    decoder = json.JSONDecoder()
+    cursor = 0
+    while True:
+        offset = text.find(EVENT_PREFIX, cursor)
+        if offset < 0:
+            return
+        payload_start = offset + len(EVENT_PREFIX)
+        next_offset = text.find(EVENT_PREFIX, payload_start)
+        payload_end = len(text) if next_offset < 0 else next_offset
+        candidate = text[payload_start:payload_end]
+        candidate = _KERNEL_CONSOLE_RECORD.sub("", candidate)
+        payload, _end = decoder.raw_decode(candidate)
+        yield _validate_event(payload)
+        if next_offset < 0:
+            return
+        cursor = next_offset

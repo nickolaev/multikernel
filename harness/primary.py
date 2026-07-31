@@ -10,10 +10,11 @@ import traceback
 from pathlib import Path
 from typing import IO, Sequence
 
-from harness.baseline import render_single_vf_baseline
+from harness.baseline import PciResource, render_baseline
 from harness.console import wait_for_alive
 from harness.events import EVENT_PREFIX, encode_marker
 from harness.inventory import PciFunction
+from harness.topology import PCI_FAMILIES, PciFamily
 
 
 BUSYBOX = "/bin/busybox"
@@ -27,11 +28,14 @@ class ScenarioFailure(RuntimeError):
 
 
 def emit(message: str) -> None:
-    print(message, flush=True)
-    if not message.startswith("MK_SECONDARY_STREAM:") and EVENT_PREFIX not in message:
+    os.write(sys.stdout.fileno(), f"{message}\n".encode("ascii", errors="replace"))
+    if not message.startswith("MK_SECONDARY_STREAM") and EVENT_PREFIX not in message:
         structured = encode_marker(message, "primary")
         if structured is not None:
-            print(structured, flush=True)
+            os.write(
+                sys.stdout.fileno(),
+                f"{structured}\n".encode("ascii", errors="replace"),
+            )
 
 
 def command(
@@ -111,6 +115,9 @@ class PrimaryScenario:
         self.vf: PciFunction | None = None
         self.pf_netdev = ""
         self.vf_host_driver = ""
+        self.family_pfs: dict[str, PciFunction] = {}
+        self.family_vfs: dict[str, tuple[PciFunction, ...]] = {}
+        self.family_netdevs: dict[str, str] = {}
 
     @property
     def assigned_vf(self) -> PciFunction:
@@ -121,7 +128,7 @@ class PrimaryScenario:
     def assert_pf_owned(self, phase: str) -> None:
         if self.pf.driver != "igb":
             raise ScenarioFailure(f"pf-driver-{phase}")
-        if read_text(self.pf.path / "sriov_numvfs") != "1":
+        if read_text(self.pf.path / "sriov_numvfs") != "4":
             raise ScenarioFailure(f"vf-count-{phase}")
         result = command(
             [BUSYBOX, "ip", "link", "show", self.pf_netdev],
@@ -194,7 +201,7 @@ class PrimaryScenario:
             f"disable-vfs-{phase}",
         )
         self.assert_vf_owner(ASSIGNMENT_DRIVER, f"disable-vfs-{phase}")
-        emit(f"MK_HOSTILE_VF_DISABLE_REJECTED phase={phase} pf={self.pf.bdf} vfs=1")
+        emit(f"MK_HOSTILE_VF_DISABLE_REJECTED phase={phase} pf={self.pf.bdf} vfs=4")
 
         expect_write_rejected(
             Path("/sys/bus/pci/drivers/igbvf/bind"),
@@ -232,7 +239,7 @@ class PrimaryScenario:
     def allocate_pool(self) -> None:
         command([BUSYBOX, "insmod", "/lib/modules/lazy_cma.ko"], "lazy-cma-module")
         result = command(
-            ["/bin/lazy_cma_tool", "-a", "512", "-n", "Multikernel Memory Pool"],
+            ["/bin/lazy_cma_tool", "-a", "1024", "-n", "Multikernel Memory Pool"],
             "pool-allocation",
             capture=True,
         )
@@ -240,67 +247,110 @@ class PrimaryScenario:
         if not self.pool_base.startswith("0x"):
             raise ScenarioFailure("pool-address")
 
-    def prepare_inventory(self) -> None:
-        netdevs = sorted((self.pf.path / "net").iterdir())
+    def configure_pf_network(self, family: PciFamily, pf: PciFunction) -> None:
+        netdevs = sorted((pf.path / "net").iterdir())
         if not netdevs:
-            raise ScenarioFailure("pf-netdev")
-        self.pf_netdev = netdevs[0].name
+            raise ScenarioFailure(f"pf-netdev-{family.name}")
+        netdev = netdevs[0].name
+        self.family_netdevs[family.name] = netdev
+        command([BUSYBOX, "ip", "link", "set", netdev, "up"], f"pf-link-{family.name}")
         command(
-            [BUSYBOX, "ip", "link", "set", self.pf_netdev, "up"],
-            "pf-link-up",
+            [BUSYBOX, "ip", "addr", "add", family.primary_address, "dev", netdev],
+            f"pf-address-{family.name}",
         )
-        command(
-            [
-                BUSYBOX,
-                "ip",
-                "addr",
-                "add",
-                "10.0.2.14/24",
-                "dev",
-                self.pf_netdev,
-            ],
-            "pf-address",
-        )
-        emit(f"MK_STAGE_PF_LINK_UP pf={self.pf.bdf} netdev={self.pf_netdev}")
-        emit(
-            f"MK_STAGE_PF_ADDRESS pf={self.pf.bdf} netdev={self.pf_netdev} "
-            "address=10.0.2.14/24"
-        )
-        time.sleep(2)
-        if not (self.pf.path / "sriov_numvfs").exists():
-            raise ScenarioFailure("vf-missing-sriov")
-        write_text(self.pf.path / "sriov_numvfs", "1\n", "vf-enable")
-        if not wait_until(lambda: self.pf.virtual_function(0) is not None):
-            raise ScenarioFailure("vf-discovery")
-        self.vf = self.pf.virtual_function(0)
-        vf = self.assigned_vf
+        emit(f"MK_COMPLEX_PF_LINK_UP family={family.name} pf={pf.bdf} netdev={netdev}")
+        if family.name == "igb0":
+            self.pf_netdev = netdev
+            emit(f"MK_STAGE_PF_LINK_UP pf={pf.bdf} netdev={netdev}")
+            emit(
+                f"MK_STAGE_PF_ADDRESS pf={pf.bdf} netdev={netdev} "
+                f"address={family.primary_address}"
+            )
+
+    def prepare_inventory(self) -> None:
+        resources: list[PciResource] = []
+        for family in PCI_FAMILIES:
+            pf = PciFunction.from_path(PCI_DEVICES / family.pf_bdf)
+            if pf.driver != family.pf_driver:
+                raise ScenarioFailure(f"pf-driver-{family.name}")
+            self.family_pfs[family.name] = pf
+            self.configure_pf_network(family, pf)
+            if not (pf.path / "sriov_numvfs").exists():
+                raise ScenarioFailure(f"vf-missing-sriov-{family.name}")
+            write_text(
+                pf.path / "sriov_numvfs",
+                f"{family.vf_count}\n",
+                f"vf-enable-{family.name}",
+            )
+            if not wait_until(
+                lambda pf=pf, family=family: all(
+                    pf.virtual_function(index) is not None
+                    for index in range(family.vf_count)
+                )
+            ):
+                raise ScenarioFailure(f"vf-discovery-{family.name}")
+            vfs = tuple(
+                pf.virtual_function(index) for index in range(family.vf_count)
+            )
+            if any(vf is None for vf in vfs):
+                raise ScenarioFailure(f"vf-discovery-{family.name}")
+            typed_vfs = tuple(vf for vf in vfs if vf is not None)
+            self.family_vfs[family.name] = typed_vfs
+            resources.append(PciResource(family.pf_resource, family.compatible_pf, pf))
+            for index, vf in enumerate(typed_vfs):
+                if not wait_until(lambda vf=vf: bool(vf.driver)):
+                    raise ScenarioFailure(f"vf-host-driver-{family.name}-{index}")
+                if vf.driver != family.vf_driver:
+                    raise ScenarioFailure(f"vf-host-driver-{family.name}-{index}")
+                if vf.iommu_group_members() != (vf.bdf,):
+                    raise ScenarioFailure(f"vf-iommu-group-{family.name}-{index}")
+                resources.append(
+                    PciResource(
+                        f"{family.vf_resource_prefix}{index}",
+                        family.compatible_vf,
+                        vf,
+                    )
+                )
+                emit(
+                    f"MK_COMPLEX_VF_HOST_OWNED family={family.name} index={index} "
+                    f"vf={vf.bdf} driver={vf.driver} group={vf.iommu_group}"
+                )
+            emit(
+                f"MK_COMPLEX_PF_READY family={family.name} pf={pf.bdf} "
+                f"driver={pf.driver} vfs={family.vf_count}"
+            )
+        self.pf = self.family_pfs["igb0"]
+        self.vf = self.family_vfs["igb0"][0]
+        self.vf_host_driver = self.assigned_vf.driver
         Path("/run/baseline.dts").write_text(
-            render_single_vf_baseline(self.pool_base, self.pf, vf)
+            render_baseline(
+                self.pool_base,
+                cpus=(2, 3, 4),
+                memory_bytes=0x40000000,
+                resources=resources,
+            )
         )
+        vf = self.assigned_vf
         emit(
             f"MK_STAGE_VF_CREATED pf={self.pf.bdf} vf={vf.bdf} "
             f"vendor={vf.vendor:04x} device={vf.device:04x}"
         )
-        if not wait_until(lambda: bool(vf.driver)):
-            raise ScenarioFailure("vf-host-driver")
-        self.vf_host_driver = vf.driver
-        if self.vf_host_driver != "igbvf":
-            raise ScenarioFailure("vf-host-driver")
-        members = vf.iommu_group_members()
-        if members != (vf.bdf,):
-            raise ScenarioFailure("vf-iommu-group-not-singleton")
         messages = dmesg()
         if "DMAR: IOMMU enabled" not in messages:
             raise ScenarioFailure("iommu-not-enabled")
         if "DMAR-IR: Enabled IRQ remapping" not in messages:
             raise ScenarioFailure("irq-remapping-not-enabled")
+        for noise_bdf in ("0000:00:05.0", "0000:00:06.0"):
+            if not (PCI_DEVICES / noise_bdf).exists():
+                raise ScenarioFailure(f"pci-noise-missing-{noise_bdf}")
         emit("MK_STAGE_IOMMU_ENABLED driver=intel_iommu strict=1 intremap=on")
         emit(f"MK_STAGE_IOMMU_GROUP vf={vf.bdf} group={vf.iommu_group} members=1")
+        emit("MK_COMPLEX_TOPOLOGY_READY pfs=3 vfs=8 assigned=0 noise=2")
 
     def wait_for_secondary(self, console: IO[bytes]) -> None:
         if wait_for_alive(
             {1: console},
-            timeout=90,
+            timeout=180,
             on_line=lambda _instance, line: emit(f"MK_SECONDARY_STREAM:{line}"),
         ):
             return
@@ -311,6 +361,142 @@ class PrimaryScenario:
             emit(line)
         raise ScenarioFailure("secondary-marker")
 
+    def expect_complex_rejected(
+        self,
+        stage: str,
+        name: str,
+        instance_id: int,
+        cpu: int,
+        resource: str,
+    ) -> None:
+        result = kerf(
+            "create",
+            name,
+            f"--id={instance_id}",
+            f"--cpus={cpu}",
+            "--memory=64MB",
+            f"--devices={resource}",
+            stage=stage,
+            check=False,
+            capture=True,
+        )
+        if result.returncode == 0:
+            raise ScenarioFailure(f"{stage}-accepted")
+        if (INSTANCES / name).exists():
+            raise ScenarioFailure(f"{stage}-instance-leaked")
+
+    def run_complex_peers(self) -> None:
+        third = PCI_FAMILIES[2]
+        self.expect_complex_rejected(
+            "complex-igb2-pf",
+            "complex-igb2-pf",
+            120,
+            4,
+            third.pf_resource,
+        )
+        third_pf = self.family_pfs[third.name]
+        if third_pf.driver != third.pf_driver:
+            raise ScenarioFailure("complex-igb2-pf-driver")
+        require_dmesg(
+            f"PCI assignment only supports SR-IOV VFs, rejecting {third_pf.bdf}",
+            "complex-igb2-pf-kernel-rejection",
+        )
+        emit(
+            f"MK_COMPLEX_PF_REJECTED family={third.name} pf={third_pf.bdf} "
+            f"driver={third_pf.driver}"
+        )
+
+        cases = (
+            (PCI_FAMILIES[1], "complex-igb1", 2, 3, 0x10000000),
+            (PCI_FAMILIES[2], "complex-igb2", 3, 4, 0x20000000),
+        )
+        for family, name, instance_id, cpu, memory_offset in cases:
+            vf = self.family_vfs[family.name][0]
+            memory_base = hex(int(self.pool_base, 16) + memory_offset)
+            kerf(
+                "create",
+                name,
+                f"--id={instance_id}",
+                f"--cpus={cpu}",
+                "--memory=256MB",
+                f"--memory-base={memory_base}",
+                f"--devices={family.vf_resource_prefix}0",
+                stage=f"complex-create-{family.name}",
+            )
+            self.expect_status(name, instance_id, "ready")
+            if vf.driver != ASSIGNMENT_DRIVER:
+                raise ScenarioFailure(f"complex-owner-{family.name}")
+            if self.family_pfs[family.name].driver != family.pf_driver:
+                raise ScenarioFailure(f"complex-pf-driver-{family.name}")
+            require_dmesg(
+                f"Attached {vf.bdf} to host-owned IOMMU domain for instance {instance_id}",
+                f"complex-iommu-{family.name}",
+            )
+            emit(
+                f"MK_COMPLEX_INSTANCE_READY family={family.name} id={instance_id} "
+                f"cpu={cpu} vf={vf.bdf} group={vf.iommu_group}"
+            )
+
+        self.expect_status("qemu-demo", 1, "active")
+        self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-concurrent-leases")
+        emit(
+            "MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=1 "
+            "families=igb0,igb1,igb2"
+        )
+
+        unassigned = 0
+        for family in PCI_FAMILIES:
+            for vf in self.family_vfs[family.name][1:]:
+                if vf.driver != family.vf_driver:
+                    raise ScenarioFailure(f"complex-unassigned-owner-{family.name}")
+                unassigned += 1
+        emit(
+            f"MK_COMPLEX_UNASSIGNED_VFS_INTACT count={unassigned} "
+            "families=3 owner=host"
+        )
+
+        emit(
+            f"MK_COMPLEX_HOSTILE_CONTAINED family=igb0 id=1 "
+            f"vf={self.assigned_vf.bdf} owner={self.assigned_vf.driver}"
+        )
+        for family, _name, instance_id, _cpu, _memory_offset in cases:
+            pf = self.family_pfs[family.name]
+            vf = self.family_vfs[family.name][0]
+            expect_write_rejected(
+                pf.path / "sriov_numvfs",
+                "0\n",
+                f"complex-disable-{family.name}",
+            )
+            expect_write_rejected(
+                Path(f"/sys/bus/pci/drivers/{family.vf_driver}/bind"),
+                f"{vf.bdf}\n",
+                f"complex-rebind-{family.name}",
+            )
+            write_text(
+                Path("/sys/bus/pci/drivers_probe"),
+                f"{vf.bdf}\n",
+                f"complex-reprobe-{family.name}",
+            )
+            if vf.driver != ASSIGNMENT_DRIVER:
+                raise ScenarioFailure(f"complex-hostile-owner-{family.name}")
+            emit(
+                f"MK_COMPLEX_HOSTILE_CONTAINED family={family.name} "
+                f"id={instance_id} vf={vf.bdf} owner={vf.driver}"
+            )
+
+        for family, name, _instance_id, _cpu, _memory_offset in cases:
+            kerf("delete", name, stage=f"complex-delete-{family.name}")
+            if (INSTANCES / name).exists():
+                raise ScenarioFailure(f"complex-delete-{family.name}")
+            vf = self.family_vfs[family.name][0]
+            if not wait_until(lambda vf=vf, family=family: vf.driver == family.vf_driver):
+                raise ScenarioFailure(f"complex-restore-{family.name}")
+            if self.family_pfs[family.name].driver != family.pf_driver:
+                raise ScenarioFailure(f"complex-pf-restore-{family.name}")
+        self.expect_status("qemu-demo", 1, "active")
+        self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-peers-restored")
+        emit("MK_COMPLEX_PEERS_RESTORED peers=2 primary_state=active")
+
     def run(self) -> None:
         self.allocate_pool()
         self.prepare_inventory()
@@ -318,14 +504,14 @@ class PrimaryScenario:
         kerf("init", "--input=/run/baseline.dts", stage="kerf-init")
         if "Multikernel Memory Pool" not in read_text(Path("/proc/iomem")):
             raise ScenarioFailure("pool-handoff")
-        emit(f"MK_STAGE_POOL_OK size=512M base={self.pool_base}")
+        emit(f"MK_STAGE_POOL_OK size=1024M base={self.pool_base}")
         self.assert_vf_owner(self.vf_host_driver, "baseline")
         emit(f"MK_STAGE_PF_RETAINED pf={self.pf.bdf} driver=igb")
         emit(
             f"MK_STAGE_VF_HOST_OWNED vf={vf.bdf} driver={self.vf_host_driver} "
             "phase=baseline"
         )
-        emit("MK_STAGE_KERF_INIT_OK cpus=2,3 memory=512M")
+        emit("MK_STAGE_KERF_INIT_OK cpus=2,3,4 memory=1024M")
         self.expect_create_rejected(
             "pf-assignment", "hostile-pf", 101, 2, "64MB", "igbpf0", "igbvf"
         )
@@ -383,6 +569,14 @@ class PrimaryScenario:
             "igbvf0",
             ASSIGNMENT_DRIVER,
         )
+        emit(
+            f"MK_COMPLEX_SECOND_OWNER_REJECTED family=igb0 vf={vf.bdf} "
+            f"owner={ASSIGNMENT_DRIVER} rollback=clean"
+        )
+        emit(
+            f"MK_COMPLEX_INSTANCE_READY family=igb0 id=1 cpu=2 "
+            f"vf={vf.bdf} group={vf.iommu_group}"
+        )
         self.hostile_lease_attempts("ready")
         device_tree = (INSTANCES / "qemu-demo/device_tree").read_bytes()
         if b"pci-host-bridges" not in device_tree:
@@ -419,6 +613,8 @@ class PrimaryScenario:
                 f"netdev={self.pf_netdev} vfs=1"
             )
             self.hostile_lease_attempts("active")
+            emit("MK_COMPLEX_INSTANCE_ACTIVE family=igb0 id=1")
+            self.run_complex_peers()
             kerf("kill", "qemu-demo", stage="kerf-kill")
             emit("MK_STAGE_KERF_KILL_OK id=1")
             self.expect_status("qemu-demo", 1, "loaded")
@@ -448,6 +644,11 @@ class PrimaryScenario:
             f"MK_STAGE_VF_RESTORED phase=cycle-1 vf={vf.bdf} "
             f"driver={self.vf_host_driver} pf={self.pf.bdf} pf_driver=igb"
         )
+        for family in PCI_FAMILIES:
+            for family_vf in self.family_vfs[family.name]:
+                if family_vf.driver != family.vf_driver:
+                    raise ScenarioFailure(f"complex-unleased-vf-{family.name}")
+        emit("MK_COMPLEX_RESTORED families=3 vfs=8 ownership=host")
         for cycle in range(2, 5):
             name = f"qemu-repeat-{cycle}"
             kerf(
@@ -511,12 +712,21 @@ class PrimaryScenario:
             f"MK_HOSTILE_SURPRISE_UNBIND_RECOVERED id=104 vf={vf.bdf} "
             f"driver={self.vf_host_driver}"
         )
-        write_text(self.pf.path / "sriov_numvfs", "0\n", "vf-teardown")
-        emit(f"MK_STAGE_VF_TEARDOWN pf={self.pf.bdf} vfs=0")
+        for family in reversed(PCI_FAMILIES):
+            pf = self.family_pfs[family.name]
+            write_text(
+                pf.path / "sriov_numvfs",
+                "0\n",
+                f"vf-teardown-{family.name}",
+            )
+            emit(
+                f"MK_STAGE_VF_TEARDOWN pf={pf.bdf} vfs=0 family={family.name}"
+            )
         emit(
             "MK_DEMO_PASS simultaneous_kernels=verified iommu=verified "
             "vf_lease=verified hostile_attempts=verified repeat_cycles=3 "
-            "fail_closed=verified"
+            "fail_closed=verified complex_topology=verified "
+            "concurrent_leases=3 active_instances=1"
         )
 
 

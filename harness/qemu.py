@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from harness.events import encode_event, format_marker, iter_events
+from harness.topology import complex_pci_args
 
 
 REQUIRED_MARKERS = (
@@ -41,9 +42,9 @@ REQUIRED_MARKERS = (
     "MK_SECONDARY_PF_ABSENT instance=1 bdf=0000:00:02.0",
     "MK_SECONDARY_PCI_ISOLATED instance=1 devices=1 vf=0000:00:12.0",
     "MK_SECONDARY_VF_READY instance=1 bdf=0000:00:12.0 driver=igbvf netdev=",
-    "MK_SECONDARY_VF_TRAFFIC_BEFORE netdev=",
-    "MK_SECONDARY_VF_DATAPATH netdev=",
-    "MK_SECONDARY_PRIMARY_REACHABLE netdev=",
+    "MK_SECONDARY_VF_TRAFFIC_BEFORE instance=1 netdev=",
+    "MK_SECONDARY_VF_DATAPATH instance=1 netdev=",
+    "MK_SECONDARY_PRIMARY_REACHABLE instance=1 netdev=",
     "MK_SECONDARY_ALIVE",
     "MK_PRIMARY_STILL_ALIVE",
     "MK_STAGE_PF_ACTIVE pf=0000:00:02.0 driver=igb",
@@ -70,6 +71,16 @@ REQUIRED_MARKERS = (
     "MK_REPEAT_CYCLE_PASS cycle=4",
     "MK_HOSTILE_SURPRISE_UNBIND_FAIL_CLOSED id=104",
     "MK_HOSTILE_SURPRISE_UNBIND_RECOVERED id=104",
+    "MK_COMPLEX_TOPOLOGY_READY pfs=3 vfs=8 assigned=0 noise=2",
+    "MK_COMPLEX_PF_REJECTED family=igb2",
+    "MK_COMPLEX_SECOND_OWNER_REJECTED family=igb0",
+    "MK_COMPLEX_INSTANCE_ACTIVE family=igb0 id=1",
+    "MK_COMPLEX_HOSTILE_CONTAINED family=igb0",
+    "MK_COMPLEX_HOSTILE_CONTAINED family=igb1",
+    "MK_COMPLEX_HOSTILE_CONTAINED family=igb2",
+    "MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=1 families=igb0,igb1,igb2",
+    "MK_COMPLEX_UNASSIGNED_VFS_INTACT count=5 families=3 owner=host",
+    "MK_COMPLEX_RESTORED families=3 vfs=8 ownership=host",
     "MK_STAGE_VF_TEARDOWN pf=0000:00:02.0 vfs=0",
     "MK_DEMO_PASS simultaneous_kernels=verified",
 )
@@ -77,6 +88,8 @@ FAILURE_MARKERS = ("MK_DEMO_FAIL", "MK_SECONDARY_FAIL")
 REQUIRED_EVENT_NAMES = (
     "MK_STAGE_IOMMU_DOMAIN",
     "MK_SECONDARY_ALIVE",
+    "MK_COMPLEX_CONCURRENT_LEASES_PASS",
+    "MK_COMPLEX_RESTORED",
     "MK_DEMO_PASS",
 )
 
@@ -110,9 +123,9 @@ class HarnessConfig:
             root=root,
             build_dir=build_dir,
             qemu=environ.get("QEMU", "qemu-system-x86_64"),
-            cpus=_numeric_setting(environ, "QEMU_CPUS", 4),
-            memory_mb=_numeric_setting(environ, "QEMU_MEMORY_MB", 6144),
-            timeout_seconds=_numeric_setting(environ, "QEMU_TIMEOUT", 300),
+            cpus=_numeric_setting(environ, "QEMU_CPUS", 6),
+            memory_mb=_numeric_setting(environ, "QEMU_MEMORY_MB", 8192),
+            timeout_seconds=_numeric_setting(environ, "QEMU_TIMEOUT", 600),
         )
         config.validate()
         return config
@@ -138,10 +151,10 @@ class HarnessConfig:
         return self.build_dir / "qemu-qmp.sock"
 
     def validate(self) -> None:
-        if self.cpus < 3:
-            raise HarnessError("QEMU_CPUS must be at least 3")
-        if self.memory_mb < 5120:
-            raise HarnessError("QEMU_MEMORY_MB must be at least 5120")
+        if self.cpus < 5:
+            raise HarnessError("QEMU_CPUS must be at least 5")
+        if self.memory_mb < 7168:
+            raise HarnessError("QEMU_MEMORY_MB must be at least 7168")
 
     def qemu_args(self) -> list[str]:
         return [
@@ -167,10 +180,7 @@ class HarnessConfig:
             "-qmp",
             f"unix:{self.qmp_socket},server=on,wait=off",
             "-no-reboot",
-            "-netdev",
-            "user,id=net0",
-            "-device",
-            "igb,netdev=net0",
+            *complex_pci_args(),
         ]
 
 

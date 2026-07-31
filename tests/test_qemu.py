@@ -22,16 +22,20 @@ class HarnessConfigTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path("/workspace/multikernel")
 
-    def test_default_qemu_topology_matches_single_igb_scenario(self) -> None:
+    def test_default_qemu_topology_matches_complex_sriov_scenario(self) -> None:
         config = HarnessConfig.from_environment(self.root, {})
 
-        self.assertEqual(config.cpus, 4)
-        self.assertEqual(config.memory_mb, 6144)
-        self.assertEqual(config.timeout_seconds, 300)
+        self.assertEqual(config.cpus, 6)
+        self.assertEqual(config.memory_mb, 8192)
+        self.assertEqual(config.timeout_seconds, 600)
         self.assertEqual(config.build_dir, self.root / "build")
         self.assertIn("q35,accel=tcg", config.qemu_args())
         self.assertIn("intel-iommu,intremap=on", config.qemu_args())
-        self.assertIn("igb,netdev=net0", config.qemu_args())
+        self.assertIn("igb,id=igb0,addr=0x2,netdev=igb0-net", config.qemu_args())
+        self.assertIn(
+            "igb,id=igb1,bus=igb1-port,addr=0x0,netdev=igb1-net",
+            config.qemu_args(),
+        )
         self.assertIn(
             f"unix:{config.qmp_socket},server=on,wait=off", config.qemu_args()
         )
@@ -59,11 +63,11 @@ class HarnessConfigTests(unittest.TestCase):
             HarnessConfig.from_environment(self.root, {"QEMU_CPUS": "four"})
 
     def test_rejects_insufficient_resources(self) -> None:
-        with self.assertRaisesRegex(HarnessError, "at least 3"):
-            HarnessConfig.from_environment(self.root, {"QEMU_CPUS": "2"})
-        with self.assertRaisesRegex(HarnessError, "at least 5120"):
+        with self.assertRaisesRegex(HarnessError, "at least 5"):
+            HarnessConfig.from_environment(self.root, {"QEMU_CPUS": "4"})
+        with self.assertRaisesRegex(HarnessError, "at least 7168"):
             HarnessConfig.from_environment(
-                self.root, {"QEMU_MEMORY_MB": "4096"}
+                self.root, {"QEMU_MEMORY_MB": "6144"}
             )
 
 

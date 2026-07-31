@@ -17,6 +17,7 @@ DEFAULTS = {
     "mk_vf_vendor": "0x8086",
     "mk_vf_device": "0x10ca",
     "mk_vf_driver": "igbvf",
+    "mk_vf_bar": "0",
     "mk_vf_address": "10.0.2.15/24",
     "mk_vf_peer": "10.0.2.2",
     "mk_primary_peer": "10.0.2.14",
@@ -56,6 +57,7 @@ class SecondaryConfig:
         self.vendor = values["mk_vf_vendor"]
         self.device = values["mk_vf_device"]
         self.driver = values["mk_vf_driver"]
+        self.bar = int(values["mk_vf_bar"])
         self.address = values["mk_vf_address"]
         self.peer = values["mk_vf_peer"]
         self.primary_peer = values["mk_primary_peer"]
@@ -101,7 +103,12 @@ class SecondaryScenario:
         self.sysfs = sysfs
 
     def fail(self, reason: str, **fields: object) -> None:
-        self.sink.emit("MK_SECONDARY_FAIL", reason=reason, **fields)
+        self.sink.emit(
+            "MK_SECONDARY_FAIL",
+            instance=self.config.instance,
+            reason=reason,
+            **fields,
+        )
 
     @staticmethod
     def read(path: Path) -> str:
@@ -141,7 +148,7 @@ class SecondaryScenario:
         vendor = self.read(vf_path / "vendor")
         device = self.read(vf_path / "device")
         try:
-            resource_line = (vf_path / "resource").read_text().splitlines()[0]
+            resource_line = (vf_path / "resource").read_text().splitlines()[config.bar]
             start, end, flags = parse_bar(resource_line)
         except (OSError, IndexError, ValueError):
             self.fail("vf-bar0-missing", bdf=config.vf_bdf)
@@ -151,7 +158,7 @@ class SecondaryScenario:
             else:
                 self.sink.emit(
                     "MK_SECONDARY_VF_BAR",
-                    index=0,
+                    index=config.bar,
                     start=start,
                     end=end,
                     flags=flags,
@@ -196,8 +203,14 @@ class SecondaryScenario:
 
     def configure_vf(self, vf_path: Path) -> str:
         config = self.config
-        driver = self.driver_name(vf_path)
-        netdev = self.netdev_name(vf_path)
+        driver = ""
+        netdev = ""
+        for _ in range(100):
+            driver = self.driver_name(vf_path)
+            netdev = self.netdev_name(vf_path)
+            if driver == config.driver and netdev:
+                break
+            time.sleep(0.1)
         if driver != config.driver:
             self.fail("vf-driver", bdf=config.vf_bdf, driver=driver)
             return ""
@@ -226,6 +239,7 @@ class SecondaryScenario:
         rx_before = int(self.read(net_path / "statistics/rx_packets"))
         self.sink.emit(
             "MK_SECONDARY_VF_TRAFFIC_BEFORE",
+            instance=config.instance,
             netdev=netdev,
             link=link,
             mac=mac,
@@ -238,6 +252,7 @@ class SecondaryScenario:
             if tx_after > tx_before and rx_after > rx_before:
                 self.sink.emit(
                     "MK_SECONDARY_VF_DATAPATH",
+                    instance=config.instance,
                     netdev=netdev,
                     peer=config.peer,
                     tx_before=tx_before,
@@ -256,9 +271,18 @@ class SecondaryScenario:
                 )
         else:
             self.fail("vf-ping", peer=config.peer)
-        if self.run_busybox("ping", "-c", "1", "-W", "5", config.primary_peer):
+        if config.primary_peer == "none":
             self.sink.emit(
                 "MK_SECONDARY_PRIMARY_REACHABLE",
+                instance=config.instance,
+                netdev=netdev,
+                peer="not-required",
+                protocol="isolated-backend",
+            )
+        elif self.run_busybox("ping", "-c", "1", "-W", "5", config.primary_peer):
+            self.sink.emit(
+                "MK_SECONDARY_PRIMARY_REACHABLE",
+                instance=config.instance,
                 netdev=netdev,
                 peer=config.primary_peer,
                 protocol="icmp",

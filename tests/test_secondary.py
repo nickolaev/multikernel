@@ -16,10 +16,10 @@ class SecondaryAgentTests(unittest.TestCase):
         self.assertEqual(config.vendor, "0x8086")
         self.assertEqual(config.device, "0x10ca")
         self.assertEqual(config.driver, "igbvf")
+        self.assertEqual(config.bar, 0)
         self.assertEqual(config.address, "10.0.2.15/24")
         self.assertEqual(config.peer, "10.0.2.2")
         self.assertEqual(config.primary_peer, "10.0.2.14")
-
     def test_cmdline_can_describe_another_vf_scenario(self):
         values = parse_cmdline(
             " ".join(
@@ -27,9 +27,10 @@ class SecondaryAgentTests(unittest.TestCase):
                     "mk_instance_id=3",
                     "mk_pf_bdf=0000:00:08.0",
                     "mk_vf_bdf=0000:00:09.0",
-                    "mk_vf_vendor=0x1af4",
-                    "mk_vf_device=0x1041",
-                    "mk_vf_driver=virtio-pci",
+                    "mk_vf_vendor=0x8086",
+                    "mk_vf_device=0x10ca",
+                    "mk_vf_driver=igbvf",
+                    "mk_vf_bar=1",
                     "mk_vf_address=10.0.3.15/24",
                     "mk_vf_peer=10.0.3.2",
                     "mk_primary_peer=10.0.3.14",
@@ -41,8 +42,9 @@ class SecondaryAgentTests(unittest.TestCase):
         self.assertEqual(config.instance, 3)
         self.assertEqual(config.pf_bdf, "0000:00:08.0")
         self.assertEqual(config.vf_bdf, "0000:00:09.0")
-        self.assertEqual(config.vendor, "0x1af4")
-        self.assertEqual(config.driver, "virtio-pci")
+        self.assertEqual(config.vendor, "0x8086")
+        self.assertEqual(config.driver, "igbvf")
+        self.assertEqual(config.bar, 1)
         self.assertEqual(config.peer, "10.0.3.2")
 
     def test_parses_first_pci_bar(self):

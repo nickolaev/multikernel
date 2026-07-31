@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness.baseline import render_single_vf_baseline
+from harness.baseline import PciResource, render_baseline, render_single_vf_baseline
 from harness.inventory import PciFunction
 
 
@@ -74,6 +74,27 @@ class PciInventoryTests(unittest.TestCase):
         self.assertIn("vendor-id = <0x8086>;", dts)
         self.assertIn("device-id = <0x10ca>;", dts)
         self.assertIn("ecam-base = /bits/ 64 <0xb0000000>;", dts)
+
+    def test_renders_a_multi_family_baseline(self) -> None:
+        pf0 = self.make_function("0000:00:02.0", "8086", "10c9", "igb", "2")
+        vf0 = self.make_function("0000:00:12.0", "8086", "10ca", "igbvf", "4")
+        pf1 = self.make_function("0000:02:00.0", "8086", "10c9", "igb", "9")
+
+        dts = render_baseline(
+            "0x240000000",
+            cpus=(2, 3, 4),
+            memory_bytes=0x40000000,
+            resources=(
+                PciResource("igbpf0", "intel,igb", pf0),
+                PciResource("igbvf0", "intel,igbvf", vf0),
+                PciResource("igbpf2", "intel,igb", pf1),
+            ),
+        )
+
+        self.assertIn("cpus = /bits/ 64 <2 3 4>;", dts)
+        self.assertIn("memory-bytes = <0x40000000>;", dts)
+        self.assertIn("igbvf0", dts)
+        self.assertIn("igbpf2", dts)
 
 
 if __name__ == "__main__":
