@@ -8,6 +8,8 @@ import stat
 import subprocess
 import time
 
+from harness.events import encode_event, format_marker
+
 
 DEFAULTS = {
     "mk_instance_id": "1",
@@ -77,11 +79,14 @@ class MarkerSink:
             self.fd = None
 
     def emit(self, event: str, **fields: object) -> None:
-        values = " ".join(f"{key}={value}" for key, value in fields.items())
-        line = event if not values else f"{event} {values}"
         if self.fd is None:
             raise RuntimeError("marker sink is not open")
-        os.write(self.fd, f"{line}\n".encode("ascii", errors="replace"))
+        lines = (
+            encode_event(event, fields, "secondary"),
+            format_marker(event, fields),
+        )
+        for line in lines:
+            os.write(self.fd, f"{line}\n".encode("ascii", errors="replace"))
 
 
 class SecondaryScenario:

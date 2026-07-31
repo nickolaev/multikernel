@@ -55,7 +55,7 @@ elif [[ "${mode}" == secondary ]]; then
 	for entry in __future__.py _collections_abc.py _py_warnings.py _weakrefset.py \
 		abc.py codecs.py collections contextlib.py copyreg.py encodings enum.py \
 		fnmatch.py functools.py genericpath.py glob.py importlib keyword.py \
-		linecache.py locale.py operator.py os.py pathlib posixpath.py re reprlib.py \
+		json linecache.py locale.py operator.py os.py pathlib posixpath.py re reprlib.py \
 		selectors.py signal.py stat.py subprocess.py threading.py types.py \
 		warnings.py zipimport.py io.py ntpath.py; do
 		cp -a "${python_stdlib}/${entry}" "${root}/usr/lib/${python_version}/"
@@ -65,6 +65,8 @@ elif [[ "${mode}" == secondary ]]; then
 		"${root}/usr/lib/python3/dist-packages/harness/__init__.py"
 	install -m 0644 "${harness_package}/secondary.py" \
 		"${root}/usr/lib/python3/dist-packages/harness/secondary.py"
+	install -m 0644 "${harness_package}/events.py" \
+		"${root}/usr/lib/python3/dist-packages/harness/events.py"
 elif [[ "${mode}" != host ]]; then
 	printf 'unknown initramfs mode: %s\n' "${mode}" >&2
 	exit 1

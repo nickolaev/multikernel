@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
+from harness.events import encode_event
 from harness.qemu import (
     FAILURE_MARKERS,
+    REQUIRED_EVENT_NAMES,
     REQUIRED_MARKERS,
     HarnessConfig,
     HarnessError,
+    QmpClient,
     validate_log,
 )
 
@@ -26,6 +32,9 @@ class HarnessConfigTests(unittest.TestCase):
         self.assertIn("q35,accel=tcg", config.qemu_args())
         self.assertIn("intel-iommu,intremap=on", config.qemu_args())
         self.assertIn("igb,netdev=net0", config.qemu_args())
+        self.assertIn(
+            f"unix:{config.qmp_socket},server=on,wait=off", config.qemu_args()
+        )
 
     def test_environment_overrides_paths_and_numeric_settings(self) -> None:
         config = HarnessConfig.from_environment(
@@ -59,8 +68,15 @@ class HarnessConfigTests(unittest.TestCase):
 
 
 class LogValidationTests(unittest.TestCase):
+    @staticmethod
+    def complete_log() -> str:
+        event_lines = [
+            encode_event(event, {}, "primary") for event in REQUIRED_EVENT_NAMES
+        ]
+        return "\n".join([*REQUIRED_MARKERS, *event_lines])
+
     def test_accepts_complete_log(self) -> None:
-        validate_log("\n".join(REQUIRED_MARKERS))
+        validate_log(self.complete_log())
 
     def test_rejects_guest_failure_markers(self) -> None:
         for marker in FAILURE_MARKERS:
@@ -69,11 +85,60 @@ class LogValidationTests(unittest.TestCase):
                     validate_log(f"{marker} reason=test")
 
     def test_reports_missing_marker(self) -> None:
-        present = "\n".join(REQUIRED_MARKERS[:-1])
+        present = "\n".join(
+            [
+                *REQUIRED_MARKERS[:-1],
+                *[encode_event(event, {}, "primary") for event in REQUIRED_EVENT_NAMES],
+            ]
+        )
         with self.assertRaisesRegex(
             HarnessError, "missing-marker.*MK_DEMO_PASS"
         ):
             validate_log(present)
+
+    def test_reports_missing_structured_event(self) -> None:
+        present = "\n".join(
+            [
+                *REQUIRED_MARKERS,
+                *[
+                    encode_event(event, {}, "primary")
+                    for event in REQUIRED_EVENT_NAMES[:-1]
+                ],
+            ]
+        )
+        with self.assertRaisesRegex(HarnessError, "missing-event.*MK_DEMO_PASS"):
+            validate_log(present)
+
+
+class QmpClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_negotiates_capabilities_and_queries_status(self) -> None:
+        completed = asyncio.Event()
+
+        async def handle(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            writer.write(b'{"QMP":{"version":{}}}\r\n')
+            await writer.drain()
+            capabilities = json.loads(await reader.readline())
+            self.assertEqual(capabilities, {"execute": "qmp_capabilities"})
+            writer.write(b'{"return":{}}\r\n')
+            await writer.drain()
+            query = json.loads(await reader.readline())
+            self.assertEqual(query, {"execute": "query-status"})
+            writer.write(b'{"return":{"status":"running"}}\r\n')
+            await writer.drain()
+            completed.set()
+            writer.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "qmp.sock"
+            server = await asyncio.start_unix_server(handle, path=socket_path)
+            async with server:
+                client = await QmpClient.connect(socket_path)
+                status = await client.execute("query-status")
+                self.assertEqual(status, {"status": "running"})
+                await completed.wait()
+                await client.close()
 
 
 if __name__ == "__main__":

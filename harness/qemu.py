@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import os
-import select
-import signal
-import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
+
+from harness.events import encode_event, format_marker, iter_events
 
 
 REQUIRED_MARKERS = (
@@ -74,6 +74,11 @@ REQUIRED_MARKERS = (
     "MK_DEMO_PASS simultaneous_kernels=verified",
 )
 FAILURE_MARKERS = ("MK_DEMO_FAIL", "MK_SECONDARY_FAIL")
+REQUIRED_EVENT_NAMES = (
+    "MK_STAGE_IOMMU_DOMAIN",
+    "MK_SECONDARY_ALIVE",
+    "MK_DEMO_PASS",
+)
 
 
 class HarnessError(RuntimeError):
@@ -124,6 +129,14 @@ class HarnessConfig:
     def log(self) -> Path:
         return self.build_dir / "qemu-serial.log"
 
+    @property
+    def event_log(self) -> Path:
+        return self.build_dir / "qemu-events.jsonl"
+
+    @property
+    def qmp_socket(self) -> Path:
+        return self.build_dir / "qemu-qmp.sock"
+
     def validate(self) -> None:
         if self.cpus < 3:
             raise HarnessError("QEMU_CPUS must be at least 3")
@@ -151,6 +164,8 @@ class HarnessConfig:
             "-nographic",
             "-monitor",
             "none",
+            "-qmp",
+            f"unix:{self.qmp_socket},server=on,wait=off",
             "-no-reboot",
             "-netdev",
             "user,id=net0",
@@ -166,67 +181,183 @@ def validate_log(log_text: str) -> None:
     for marker in REQUIRED_MARKERS:
         if marker not in log_text:
             raise HarnessError(f"missing-marker marker={marker!r}")
-
-
-def _terminate_process(process: subprocess.Popen[bytes]) -> None:
-    process.send_signal(signal.SIGTERM)
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+        event_names = {event["event"] for event in iter_events(log_text)}
+    except (ValueError, json.JSONDecodeError) as error:
+        raise HarnessError("malformed-event") from error
+    for event_name in REQUIRED_EVENT_NAMES:
+        if event_name not in event_names:
+            raise HarnessError(f"missing-event event={event_name!r}")
+
+
+class QmpClient:
+    def __init__(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+
+    @classmethod
+    async def connect(cls, path: Path, timeout: float = 10) -> "QmpClient":
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            try:
+                reader, writer = await asyncio.open_unix_connection(path)
+                break
+            except OSError as error:
+                if loop.time() >= deadline:
+                    raise HarnessError("qmp-connect") from error
+                await asyncio.sleep(0.05)
+        client = cls(reader, writer)
+        greeting = await client._read_message()
+        if "QMP" not in greeting:
+            await client.close()
+            raise HarnessError("qmp-greeting")
+        await client.execute("qmp_capabilities")
+        return client
+
+    async def _read_message(self) -> dict[str, object]:
+        line = await self.reader.readline()
+        if not line:
+            raise HarnessError("qmp-eof")
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise HarnessError("qmp-json") from error
+        if not isinstance(message, dict):
+            raise HarnessError("qmp-message")
+        return message
+
+    async def execute(self, command: str) -> object:
+        request = json.dumps({"execute": command}, separators=(",", ":"))
+        self.writer.write(f"{request}\r\n".encode())
+        await self.writer.drain()
+        while True:
+            response = await self._read_message()
+            if "error" in response:
+                raise HarnessError(f"qmp-command command={command}")
+            if "return" in response:
+                return response["return"]
+
+    async def close(self) -> None:
+        self.writer.close()
+        try:
+            await self.writer.wait_closed()
+        except OSError:
+            pass
+
+
+def _host_event(
+    event: str, fields: dict[str, object], recorded: list[dict[str, object]]
+) -> None:
+    payload = {"event": event, "fields": fields, "source": "host"}
+    recorded.append(payload)
+    print(format_marker(event, fields), flush=True)
+    print(encode_event(event, fields, "host"), flush=True)
+
+
+async def _stream_serial(reader: asyncio.StreamReader, log: Path) -> None:
+    with log.open("wb") as log_file:
+        while chunk := await reader.read(64 * 1024):
+            log_file.write(chunk)
+            log_file.flush()
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+
+
+async def _stop_qemu(
+    process: asyncio.subprocess.Process, qmp: QmpClient | None
+) -> None:
+    if qmp is not None:
+        try:
+            await asyncio.wait_for(qmp.execute("quit"), timeout=2)
+        except (HarnessError, asyncio.TimeoutError):
+            pass
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+        return
+    except asyncio.TimeoutError:
+        process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except asyncio.TimeoutError:
         process.kill()
-        process.wait()
+        await process.wait()
+
+
+def _write_event_log(
+    path: Path, host_events: list[dict[str, object]], serial_text: str
+) -> int:
+    events = [*host_events, *iter_events(serial_text)]
+    lines = [
+        json.dumps(event, sort_keys=True, separators=(",", ":"), default=str)
+        for event in events
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    return len(events)
+
+
+async def _run_test_async(config: HarnessConfig) -> int:
+    config.build_dir.mkdir(parents=True, exist_ok=True)
+    config.qmp_socket.unlink(missing_ok=True)
+    host_events: list[dict[str, object]] = []
+    _host_event(
+        "MK_QEMU_START",
+        {"timeout": f"{config.timeout_seconds}s", "log": config.log},
+        host_events,
+    )
+    process = await asyncio.create_subprocess_exec(
+        config.qemu,
+        *config.qemu_args(),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    assert process.stdout is not None
+    serial_task = asyncio.create_task(_stream_serial(process.stdout, config.log))
+    qmp: QmpClient | None = None
+    try:
+        qmp = await QmpClient.connect(config.qmp_socket)
+        status = await qmp.execute("query-status")
+        status_name = status.get("status", "unknown") if isinstance(status, dict) else "unknown"
+        _host_event("MK_QMP_CONNECTED", {"status": status_name}, host_events)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=config.timeout_seconds)
+        except asyncio.TimeoutError as error:
+            await _stop_qemu(process, qmp)
+            raise HarnessError("timeout") from error
+        await serial_task
+    finally:
+        if process.returncode is None:
+            await _stop_qemu(process, qmp)
+        if not serial_task.done():
+            serial_task.cancel()
+            await asyncio.gather(serial_task, return_exceptions=True)
+        if qmp is not None:
+            await qmp.close()
+        config.qmp_socket.unlink(missing_ok=True)
+    if process.returncode != 0:
+        raise HarnessError(f"exit-status status={process.returncode}")
+    serial_text = config.log.read_text(errors="replace")
+    validate_log(serial_text)
+    _host_event(
+        "MK_QEMU_TEST_PASS",
+        {"markers": len(REQUIRED_MARKERS), "log": config.log},
+        host_events,
+    )
+    event_count = _write_event_log(config.event_log, host_events, serial_text)
+    print(f"MK_QEMU_EVENTS_OK events={event_count} log={config.event_log}")
+    return 0
 
 
 def _run_test(config: HarnessConfig) -> int:
-    config.build_dir.mkdir(parents=True, exist_ok=True)
-    print(
-        f"MK_QEMU_START timeout={config.timeout_seconds}s log={config.log}",
-        flush=True,
-    )
-    process = subprocess.Popen(
-        [config.qemu, *config.qemu_args()],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    assert process.stdout is not None
-    deadline = time.monotonic() + config.timeout_seconds
-    timed_out = False
-    with config.log.open("wb") as log_file:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                _terminate_process(process)
-                break
-            readable, _, _ = select.select(
-                [process.stdout], [], [], min(remaining, 0.5)
-            )
-            if readable:
-                chunk = os.read(process.stdout.fileno(), 64 * 1024)
-                if chunk:
-                    log_file.write(chunk)
-                    log_file.flush()
-                    sys.stdout.buffer.write(chunk)
-                    sys.stdout.buffer.flush()
-            if process.poll() is not None:
-                remainder = process.stdout.read()
-                if remainder:
-                    log_file.write(remainder)
-                    sys.stdout.buffer.write(remainder)
-                    sys.stdout.buffer.flush()
-                break
-
-    if timed_out:
-        raise HarnessError("timeout")
-    if process.returncode != 0:
-        raise HarnessError(f"exit-status status={process.returncode}")
-    validate_log(config.log.read_text(errors="replace"))
-    print(f"MK_QEMU_TEST_PASS markers={len(REQUIRED_MARKERS)} log={config.log}")
-    return 0
+    return asyncio.run(_run_test_async(config))
 
 
 def run(mode: str, config: HarnessConfig) -> int:
     if mode == "run":
+        config.build_dir.mkdir(parents=True, exist_ok=True)
+        config.qmp_socket.unlink(missing_ok=True)
         os.execvpe(config.qemu, [config.qemu, *config.qemu_args()], os.environ)
         raise AssertionError("execvpe returned")
     return _run_test(config)

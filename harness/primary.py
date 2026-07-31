@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import select
 import subprocess
 import sys
 import time
@@ -12,6 +11,8 @@ from pathlib import Path
 from typing import IO, Sequence
 
 from harness.baseline import render_single_vf_baseline
+from harness.console import wait_for_alive
+from harness.events import EVENT_PREFIX, encode_marker
 from harness.inventory import PciFunction
 
 
@@ -27,6 +28,10 @@ class ScenarioFailure(RuntimeError):
 
 def emit(message: str) -> None:
     print(message, flush=True)
+    if not message.startswith("MK_SECONDARY_STREAM:") and EVENT_PREFIX not in message:
+        structured = encode_marker(message, "primary")
+        if structured is not None:
+            print(structured, flush=True)
 
 
 def command(
@@ -293,22 +298,12 @@ class PrimaryScenario:
         emit(f"MK_STAGE_IOMMU_GROUP vf={vf.bdf} group={vf.iommu_group} members=1")
 
     def wait_for_secondary(self, console: IO[bytes]) -> None:
-        deadline = time.monotonic() + 90
-        buffered = b""
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([console], [], [], 1)
-            if not readable:
-                continue
-            chunk = os.read(console.fileno(), 4096)
-            if not chunk:
-                break
-            buffered += chunk
-            while b"\n" in buffered:
-                raw_line, buffered = buffered.split(b"\n", 1)
-                line = raw_line.decode(errors="replace")
-                emit(f"MK_SECONDARY_STREAM:{line}")
-                if "MK_SECONDARY_ALIVE" in line:
-                    return
+        if wait_for_alive(
+            {1: console},
+            timeout=90,
+            on_line=lambda _instance, line: emit(f"MK_SECONDARY_STREAM:{line}"),
+        ):
+            return
         status = read_text(INSTANCES / "qemu-demo/status")
         cpu_online = read_text(Path("/sys/devices/system/cpu/cpu2/online"))
         emit(f"MK_SECONDARY_TIMEOUT_DIAG id=1 status={status} cpu2_online={cpu_online}")
