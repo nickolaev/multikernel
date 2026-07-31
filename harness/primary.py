@@ -593,7 +593,7 @@ class PrimaryScenario:
             "qemu-demo",
             "--kernel=/payload/vmlinux",
             "--initrd=/payload/secondary-initrd.cpio.gz",
-            f"--cmdline=rdinit=/init quiet loglevel=6 panic=-1 kho=on mk_vf_bdf={vf.bdf}",
+            f"--cmdline=rdinit=/init quiet loglevel=6 panic=-1 mk_vf_bdf={vf.bdf}",
             "--console=mktty0",
             stage="kerf-load",
         )

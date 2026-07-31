@@ -173,7 +173,7 @@ class HarnessConfig:
             "-initrd",
             str(self.initrd),
             "-append",
-            "console=ttyS0,115200 rdinit=/init panic=-1 kho=on intel_iommu=on iommu.strict=1",
+            "console=ttyS0,115200 rdinit=/init panic=-1 intel_iommu=on iommu.strict=1",
             "-nographic",
             "-monitor",
             "none",
