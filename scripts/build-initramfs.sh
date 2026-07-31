@@ -39,7 +39,33 @@ if [[ "${mode}" == host ]]; then
 	install -m 0644 "${secondary_initrd}" "${root}/payload/secondary-initrd.cpio.gz"
 	install -m 0644 "${lazy_cma_module}" "${root}/lib/modules/lazy_cma.ko"
 	install -m 0755 "${lazy_cma_tool}" "${root}/bin/lazy_cma_tool"
-elif [[ "${mode}" != secondary ]]; then
+elif [[ "${mode}" == secondary ]]; then
+	[[ $# -eq 6 ]] || { printf 'secondary mode requires PYTHON_RUNTIME HARNESS_PACKAGE\n' >&2; exit 1; }
+	python_runtime=$5
+	harness_package=$6
+	python_binary="${python_runtime}/usr/bin/python3"
+	python_stdlib=$(find "${python_runtime}/usr/lib" -maxdepth 1 -type d -name 'python3.*' -print -quit)
+	[[ -n "${python_stdlib}" ]] || { printf 'Python standard library not found in %s\n' "${python_runtime}" >&2; exit 1; }
+	python_version=${python_stdlib##*/}
+	mkdir -p "${root}/usr/bin" "${root}/usr/lib/${python_version}"
+	install -m 0755 "${python_binary}" "${root}/usr/bin/python3"
+	while IFS= read -r library; do
+		install -D -m 0755 "${library}" "${root}${library}"
+	done < <(ldd "${python_binary}" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
+	for entry in __future__.py _collections_abc.py _py_warnings.py _weakrefset.py \
+		abc.py codecs.py collections contextlib.py copyreg.py encodings enum.py \
+		fnmatch.py functools.py genericpath.py glob.py importlib keyword.py \
+		linecache.py locale.py operator.py os.py pathlib posixpath.py re reprlib.py \
+		selectors.py signal.py stat.py subprocess.py threading.py types.py \
+		warnings.py zipimport.py io.py ntpath.py; do
+		cp -a "${python_stdlib}/${entry}" "${root}/usr/lib/${python_version}/"
+	done
+	mkdir -p "${root}/usr/lib/python3/dist-packages/harness"
+	install -m 0644 "${harness_package}/__init__.py" \
+		"${root}/usr/lib/python3/dist-packages/harness/__init__.py"
+	install -m 0644 "${harness_package}/secondary.py" \
+		"${root}/usr/lib/python3/dist-packages/harness/secondary.py"
+elif [[ "${mode}" != host ]]; then
 	printf 'unknown initramfs mode: %s\n' "${mode}" >&2
 	exit 1
 fi

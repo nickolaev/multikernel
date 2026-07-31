@@ -1,126 +1,19 @@
 #!/bin/sh
 
 PATH=/bin:/sbin
+PYTHONHOME=/usr
+PYTHONPATH=/usr/lib/python3/dist-packages
+PYTHONDONTWRITEBYTECODE=1
 export PATH
+export PYTHONHOME PYTHONPATH PYTHONDONTWRITEBYTECODE
 
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 
-for attempt in 1 2 3 4 5; do
-	if [ -c /dev/mktty0 ]; then
-		printf 'MK_SECONDARY_INIT_STARTED instance=1\n' >/dev/mktty0
-		break
-	fi
-	sleep 1
-done
-
-vf_bdf=
-for arg in $(cat /proc/cmdline); do
-	case "$arg" in
-		mk_vf_bdf=*) vf_bdf=${arg#mk_vf_bdf=} ;;
-	esac
-done
-
-if [ -c /dev/mktty0 ]; then
-	vf_path=/sys/bus/pci/devices/$vf_bdf
-	if [ -n "$vf_bdf" ] && [ -e "$vf_path/vendor" ] && [ -e "$vf_path/device" ]; then
-		vf_vendor=$(cat "$vf_path/vendor")
-		vf_device=$(cat "$vf_path/device")
-		read -r resource_start resource_end resource_flags <"$vf_path/resource"
-		if [ "$resource_start" = 0x0000000000000000 ] ||
-		   [ "$resource_end" = 0x0000000000000000 ]; then
-			printf 'MK_SECONDARY_FAIL reason=vf-bar0-missing bdf=%s\n' "$vf_bdf" >/dev/mktty0
-		else
-			printf 'MK_SECONDARY_VF_BAR index=0 start=%s end=%s flags=%s\n' \
-				"$resource_start" "$resource_end" "$resource_flags" >/dev/mktty0
-		fi
-		if [ "$vf_vendor" = 0x8086 ] && [ "$vf_device" = 0x10ca ]; then
-			printf 'MK_SECONDARY_VF_ENUMERATED instance=1 bdf=%s vendor=%s device=%s\n' \
-				"$vf_bdf" "$vf_vendor" "$vf_device" >/dev/mktty0
-		else
-			printf 'MK_SECONDARY_FAIL reason=vf-identity bdf=%s vendor=%s device=%s\n' \
-				"$vf_bdf" "$vf_vendor" "$vf_device" >/dev/mktty0
-		fi
-	else
-		printf 'MK_SECONDARY_FAIL reason=vf-not-enumerated bdf=%s\n' "$vf_bdf" >/dev/mktty0
-	fi
-	if [ ! -e /sys/bus/pci/devices/0000:00:02.0 ]; then
-		printf 'MK_SECONDARY_PF_ABSENT instance=1 bdf=0000:00:02.0\n' >/dev/mktty0
-	else
-		printf 'MK_SECONDARY_FAIL reason=pf-visible bdf=0000:00:02.0\n' >/dev/mktty0
-	fi
-	pci_count=0
-	unexpected_bdf=
-	for pci_path in /sys/bus/pci/devices/*; do
-		[ -e "$pci_path" ] || continue
-		pci_bdf=${pci_path##*/}
-		pci_count=$((pci_count + 1))
-		[ "$pci_bdf" = "$vf_bdf" ] || unexpected_bdf=$pci_bdf
-	done
-	if [ "$pci_count" -eq 1 ] && [ -z "$unexpected_bdf" ]; then
-		printf 'MK_SECONDARY_PCI_ISOLATED instance=1 devices=1 vf=%s\n' \
-			"$vf_bdf" >/dev/mktty0
-	else
-		printf 'MK_SECONDARY_FAIL reason=pci-scope devices=%s unexpected=%s\n' \
-			"$pci_count" "$unexpected_bdf" >/dev/mktty0
-	fi
-	driver=$(/bin/busybox readlink "$vf_path/driver" 2>/dev/null || true)
-	vf_netdev=
-	vf_ready=0
-	for net_path in "$vf_path"/net/*; do
-		[ -e "$net_path" ] || continue
-		vf_netdev=${net_path##*/}
-		break
-	done
-	case "$driver" in
-		*/igbvf)
-			if [ -n "$vf_netdev" ]; then
-				printf 'MK_SECONDARY_VF_READY instance=1 bdf=%s driver=igbvf netdev=%s\n' \
-					"$vf_bdf" "$vf_netdev" >/dev/mktty0
-				vf_ready=1
-			else
-				printf 'MK_SECONDARY_FAIL reason=vf-netdev-missing bdf=%s\n' "$vf_bdf" >/dev/mktty0
-			fi
-			;;
-		*) printf 'MK_SECONDARY_FAIL reason=vf-driver bdf=%s driver=%s\n' \
-			"$vf_bdf" "$driver" >/dev/mktty0 ;;
-	esac
-	if [ "$vf_ready" -eq 1 ]; then
-		/bin/busybox ip link set "$vf_netdev" up ||
-			printf 'MK_SECONDARY_FAIL reason=vf-link-up netdev=%s\n' "$vf_netdev" >/dev/mktty0
-		/bin/busybox ip addr add 10.0.2.15/24 dev "$vf_netdev" ||
-			printf 'MK_SECONDARY_FAIL reason=vf-address netdev=%s\n' "$vf_netdev" >/dev/mktty0
-		vf_mac=$(cat "/sys/class/net/$vf_netdev/address")
-		vf_link=$(cat "/sys/class/net/$vf_netdev/operstate")
-		tx_before=$(cat "/sys/class/net/$vf_netdev/statistics/tx_packets")
-		rx_before=$(cat "/sys/class/net/$vf_netdev/statistics/rx_packets")
-		printf 'MK_SECONDARY_VF_TRAFFIC_BEFORE netdev=%s link=%s mac=%s tx=%s rx=%s\n' \
-			"$vf_netdev" "$vf_link" "$vf_mac" "$tx_before" "$rx_before" >/dev/mktty0
-		if /bin/busybox ping -c 1 -W 5 10.0.2.2 >/dev/null 2>&1; then
-			tx_after=$(cat "/sys/class/net/$vf_netdev/statistics/tx_packets")
-			rx_after=$(cat "/sys/class/net/$vf_netdev/statistics/rx_packets")
-			if [ "$tx_after" -gt "$tx_before" ] && [ "$rx_after" -gt "$rx_before" ]; then
-				printf 'MK_SECONDARY_VF_DATAPATH netdev=%s peer=10.0.2.2 tx_before=%s tx_after=%s rx_before=%s rx_after=%s\n' \
-					"$vf_netdev" "$tx_before" "$tx_after" "$rx_before" "$rx_after" >/dev/mktty0
-			else
-				printf 'MK_SECONDARY_FAIL reason=vf-counters netdev=%s tx_before=%s tx_after=%s rx_before=%s rx_after=%s\n' \
-					"$vf_netdev" "$tx_before" "$tx_after" "$rx_before" "$rx_after" >/dev/mktty0
-			fi
-		else
-			printf 'MK_SECONDARY_FAIL reason=vf-ping peer=10.0.2.2\n' >/dev/mktty0
-		fi
-		if /bin/busybox ping -c 1 -W 5 10.0.2.14 >/dev/null 2>&1; then
-			printf 'MK_SECONDARY_PRIMARY_REACHABLE netdev=%s peer=10.0.2.14 protocol=icmp\n' "$vf_netdev" >/dev/mktty0
-		else
-			printf 'MK_SECONDARY_FAIL reason=primary-ping peer=10.0.2.14\n' >/dev/mktty0
-		fi
-	fi
-	printf 'MK_SECONDARY_ALIVE instance=1 pid=%s\n' "$$" >/dev/mktty0
-else
-	printf 'MK_SECONDARY_FAIL missing=console\n' >/dev/console
-fi
-
-while :; do
-	sleep 3600
-done
+/usr/bin/python3 -S -m harness.secondary
+status=$?
+printf 'MK_SECONDARY_FAIL reason=python-exit status=%s\n' "${status}" >/dev/console
+sync
+poweroff -f
+while :; do sleep 1; done
