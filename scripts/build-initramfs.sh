@@ -24,18 +24,19 @@ for applet in sh mount mkdir cat grep sleep poweroff timeout sync; do
 done
 
 if [[ "${mode}" == host ]]; then
-	[[ $# -eq 10 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD BASELINE_DTS LAZY_CMA_MODULE LAZY_CMA_TOOL\n' >&2; exit 1; }
+	[[ $# -eq 10 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE\n' >&2; exit 1; }
 	kerf_runtime=$5
 	kernel=$6
 	secondary_initrd=$7
-	baseline_dts=$8
-	lazy_cma_module=$9
-	lazy_cma_tool=${10}
+	lazy_cma_module=$8
+	lazy_cma_tool=$9
+	harness_package=${10}
 	mkdir -p "${root}/assets" "${root}/payload" "${root}/lib/modules"
 	cp -a "${kerf_runtime}/." "${root}/"
+	mkdir -p "${root}/usr/lib/python3/dist-packages/harness"
+	cp -a "${harness_package}/." "${root}/usr/lib/python3/dist-packages/harness/"
 	install -m 0644 "${kernel}" "${root}/payload/vmlinux"
 	install -m 0644 "${secondary_initrd}" "${root}/payload/secondary-initrd.cpio.gz"
-	install -m 0644 "${baseline_dts}" "${root}/assets/baseline.dts"
 	install -m 0644 "${lazy_cma_module}" "${root}/lib/modules/lazy_cma.ko"
 	install -m 0755 "${lazy_cma_tool}" "${root}/bin/lazy_cma_tool"
 elif [[ "${mode}" != secondary ]]; then

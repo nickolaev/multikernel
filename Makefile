@@ -10,6 +10,7 @@ HOST_DEPS := $(BUILD_DIR)/host-deps/root
 KERF_RUNTIME := $(BUILD_DIR)/kerf-runtime
 LAZY_CMA_BUILD := $(BUILD_DIR)/lazy-cma
 KERF_PYTHON_SOURCES := $(shell find '$(KERF_DIR)/src/kerf' -type f -name '*.py' 2>/dev/null)
+HARNESS_PYTHON_SOURCES := $(shell find '$(ROOT)/harness' -type f -name '*.py' 2>/dev/null)
 LAZY_CMA_SOURCES := $(LAZY_CMA_DIR)/lazy_cma.c $(LAZY_CMA_DIR)/lazy_cma_tool.c $(LAZY_CMA_DIR)/version.h
 JOBS ?= $(shell nproc)
 CC ?= cc
@@ -91,10 +92,11 @@ lazy-cma: $(LAZY_CMA_BUILD)/.ready
 $(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-initramfs.sh | preflight
 	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<'
 
-$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(ROOT)/initramfs/baseline.dts $(ROOT)/scripts/build-initramfs.sh
+$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh
 	'$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
-		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' '$(ROOT)/initramfs/baseline.dts' \
-		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool'
+		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' \
+		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool' \
+		'$(ROOT)/harness'
 
 initrd: $(SECONDARY_INITRD) $(HOST_INITRD)
 
