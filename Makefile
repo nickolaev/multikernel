@@ -24,7 +24,7 @@ SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
 
-.PHONY: all preflight config kernel kerf-runtime lazy-cma initrd build run test clean help FORCE
+.PHONY: all preflight config kernel kerf-runtime lazy-cma initrd build unit-test run test clean help FORCE
 
 all: build
 
@@ -37,6 +37,7 @@ help:
 	  'make lazy-cma     - build the contiguous-memory module and helper' \
 	  'make initrd       - build the host and secondary initramfs images' \
 	  'make build        - build all required artifacts' \
+	  'make unit-test    - run the Python harness unit tests' \
 	  'make run          - run QEMU interactively on the serial console' \
 	  'make test         - run QEMU and assert all proof markers' \
 	  'make clean        - remove only the top-level build directory'
@@ -101,11 +102,14 @@ build: preflight kernel kerf-runtime initrd
 	@printf 'MK_BUILD_OK kernel=%s host_initrd=%s secondary_initrd=%s\n' \
 		'$(KERNEL)' '$(HOST_INITRD)' '$(SECONDARY_INITRD)'
 
-run: build
-	QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' run
+unit-test:
+	'$(PYTHON)' -m unittest discover -s '$(ROOT)/tests' -v
 
-test: build
-	QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' test
+run: build
+	PYTHON='$(PYTHON)' QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' run
+
+test: unit-test build
+	PYTHON='$(PYTHON)' QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' test
 
 clean:
 	rm -rf -- '$(BUILD_DIR)'
