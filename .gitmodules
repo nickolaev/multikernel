@@ -9,3 +9,7 @@
 [submodule "lazy_cma"]
 	path = lazy_cma
 	url = https://github.com/multikernel/lazy_cma.git
+[submodule "qemu"]
+	path = qemu
+	url = https://github.com/nickolaev/qemu.git
+	branch = multikernel
