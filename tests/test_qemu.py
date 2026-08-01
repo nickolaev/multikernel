@@ -82,6 +82,18 @@ class LogValidationTests(unittest.TestCase):
     def test_accepts_complete_log(self) -> None:
         validate_log(self.complete_log())
 
+    def test_requires_qemu_lifecycle_not_kerf_execution_markers(self) -> None:
+        self.assertIn("MK_STAGE_QEMU_LAUNCH_OK", REQUIRED_MARKERS)
+        self.assertIn("MK_STAGE_QEMU_TERMINATE_OK", REQUIRED_MARKERS)
+        for marker in (
+            "MK_STAGE_KERF_LOAD_OK",
+            "MK_STAGE_MKTTY_CONNECTED",
+            "MK_STAGE_KERF_EXEC_OK",
+            "MK_STAGE_KERF_KILL_OK",
+            "MK_STAGE_KERF_UNLOAD_OK",
+        ):
+            self.assertNotIn(marker, REQUIRED_MARKERS)
+
     def test_rejects_guest_failure_markers(self) -> None:
         for marker in FAILURE_MARKERS:
             with self.subTest(marker=marker):

@@ -21,6 +21,9 @@ BUSYBOX = "/bin/busybox"
 PCI_DEVICES = Path("/sys/bus/pci/devices")
 INSTANCES = Path("/sys/fs/multikernel/instances")
 ASSIGNMENT_DRIVER = "multikernel-pci-assignment"
+MULTIKERNEL_QEMU = "/usr/bin/qemu-system-x86_64"
+SECONDARY_KERNEL = "/payload/vmlinux"
+SECONDARY_INITRD = "/payload/secondary-initrd.cpio.gz"
 
 
 class ScenarioFailure(RuntimeError):
@@ -106,6 +109,85 @@ def wait_until(predicate, attempts: int = 50) -> bool:
             return True
         time.sleep(1)
     return False
+
+
+def qemu_arguments(vf_bdf: str) -> list[str]:
+    """Return the only supported nested-QEMU boot command."""
+    return [
+        MULTIKERNEL_QEMU,
+        "-machine",
+        "multikernel",
+        "-accel",
+        "multikernel,instance-id=1",
+        "-kernel",
+        SECONDARY_KERNEL,
+        "-initrd",
+        SECONDARY_INITRD,
+        "-append",
+        "console=mktty0 rdinit=/init quiet loglevel=6 panic=-1 "
+        f"mk_vf_bdf={vf_bdf}",
+        "-nographic",
+        "-monitor",
+        "none",
+    ]
+
+
+def launch_qemu(vf_bdf: str) -> subprocess.Popen[bytes]:
+    try:
+        process = subprocess.Popen(
+            qemu_arguments(vf_bdf),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except OSError as error:
+        raise ScenarioFailure("qemu-launch") from error
+    if process.stdout is None:
+        raise ScenarioFailure("qemu-stdout")
+    return process
+
+
+def wait_for_qemu_active(
+    process: subprocess.Popen[bytes],
+    status_path: Path,
+    *,
+    attempts: int = 500,
+) -> None:
+    """Wait for QEMU to start the secondary, preserving an early error."""
+    for _ in range(attempts):
+        if read_text(status_path) == "active":
+            emit("MK_STAGE_STATUS_active name=qemu-demo id=1")
+            return
+        returncode = process.poll()
+        if returncode is not None:
+            if process.stdout is not None:
+                output = process.stdout.read().decode("utf-8", errors="replace")
+                for line in output.splitlines():
+                    emit(f"MK_QEMU_OUTPUT {line}")
+            raise ScenarioFailure(f"qemu-exit-{returncode}")
+        time.sleep(0.1)
+
+    actual = read_text(status_path)
+    emit(
+        "MK_STATUS_MISMATCH name=qemu-demo id=1 "
+        f"expected=active actual={actual}"
+    )
+    raise ScenarioFailure("status-qemu-demo-active")
+
+
+def terminate_qemu(process: subprocess.Popen[bytes]) -> None:
+    """Request QEMU teardown and bound the wait so a failed guest cannot hang us."""
+    if process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            try:
+                process.kill()
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise ScenarioFailure("qemu-terminate") from error
 
 
 class PrimaryScenario:
@@ -588,24 +670,13 @@ class PrimaryScenario:
         if vf.bdf.encode("ascii") not in device_tree:
             raise ScenarioFailure("vf-instance-dtb")
         emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource=igbvf0")
-        kerf(
-            "load",
-            "qemu-demo",
-            "--kernel=/payload/vmlinux",
-            "--initrd=/payload/secondary-initrd.cpio.gz",
-            f"--cmdline=rdinit=/init quiet loglevel=6 panic=-1 mk_vf_bdf={vf.bdf}",
-            "--console=mktty0",
-            stage="kerf-load",
+        qemu = launch_qemu(vf.bdf)
+        emit("MK_STAGE_QEMU_LAUNCH_OK id=1")
+        wait_for_qemu_active(
+            qemu, INSTANCES / "qemu-demo" / "status"
         )
-        emit("MK_STAGE_KERF_LOAD_OK id=1")
-        self.expect_status("qemu-demo", 1, "loaded")
-        with open("/dev/mktty", "r+b", buffering=0) as console:
-            console.write(b"1\n")
-            emit("MK_STAGE_MKTTY_CONNECTED id=1")
-            kerf("exec", "qemu-demo", stage="kerf-exec")
-            emit("MK_STAGE_KERF_EXEC_OK id=1")
-            self.expect_status("qemu-demo", 1, "active")
-            self.wait_for_secondary(console)
+        try:
+            self.wait_for_secondary(qemu.stdout)
             emit("MK_PRIMARY_STILL_ALIVE instance=0 after=MK_SECONDARY_ALIVE")
             self.assert_vf_owner(ASSIGNMENT_DRIVER, "active")
             emit(
@@ -615,24 +686,19 @@ class PrimaryScenario:
             self.hostile_lease_attempts("active")
             emit("MK_COMPLEX_INSTANCE_ACTIVE family=igb0 id=1")
             self.run_complex_peers()
-            kerf("kill", "qemu-demo", stage="kerf-kill")
-            emit("MK_STAGE_KERF_KILL_OK id=1")
-            self.expect_status("qemu-demo", 1, "loaded")
-            if vf.driver != ASSIGNMENT_DRIVER:
-                raise ScenarioFailure("vf-lease-released-on-kill")
-            emit(
-                f"MK_HOSTILE_LEASE_PERSISTED phase=after-kill vf={vf.bdf} "
-                f"owner={ASSIGNMENT_DRIVER}"
-            )
-            kerf("unload", "qemu-demo", stage="kerf-unload")
-            emit("MK_STAGE_KERF_UNLOAD_OK id=1")
-            self.expect_status("qemu-demo", 1, "ready")
-            if vf.driver != ASSIGNMENT_DRIVER:
-                raise ScenarioFailure("vf-lease-released-on-unload")
-            emit(
-                f"MK_HOSTILE_LEASE_PERSISTED phase=after-unload vf={vf.bdf} "
-                f"owner={ASSIGNMENT_DRIVER}"
-            )
+        finally:
+            try:
+                terminate_qemu(qemu)
+            finally:
+                qemu.stdout.close()
+        emit("MK_STAGE_QEMU_TERMINATE_OK id=1")
+        self.expect_status("qemu-demo", 1, "ready")
+        if vf.driver != ASSIGNMENT_DRIVER:
+            raise ScenarioFailure("vf-lease-released-on-qemu-terminate")
+        emit(
+            f"MK_HOSTILE_LEASE_PERSISTED phase=after-qemu-terminate vf={vf.bdf} "
+            f"owner={ASSIGNMENT_DRIVER}"
+        )
         kerf("delete", "qemu-demo", stage="kerf-delete")
         emit("MK_STAGE_KERF_DELETE_OK id=1")
         if (INSTANCES / "qemu-demo").exists():

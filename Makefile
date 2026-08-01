@@ -4,7 +4,13 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 LINUX_DIR ?= $(ROOT)/linux
 KERF_DIR ?= $(ROOT)/kerf
 LAZY_CMA_DIR ?= $(ROOT)/lazy_cma
+QEMU_DIR ?= $(ROOT)/qemu
+QEMU_BUILD_DIR ?= $(QEMU_DIR)/build-multikernel
 BUILD_DIR ?= $(ROOT)/build
+QEMU_DEPS_DIR := $(BUILD_DIR)/qemu-deps
+QEMU_DEPS := $(QEMU_DEPS_DIR)/root
+QEMU_NINJA := $(QEMU_DEPS)/usr/bin/ninja
+QEMU_PKG_CONFIG_PATH := $(QEMU_DEPS)/usr/lib/x86_64-linux-gnu/pkgconfig:$(QEMU_DEPS)/usr/share/pkgconfig
 KBUILD_DIR := $(BUILD_DIR)/kernel
 HOST_DEPS := $(BUILD_DIR)/host-deps/root
 KERF_RUNTIME := $(BUILD_DIR)/kerf-runtime
@@ -24,8 +30,9 @@ KERNEL := $(KBUILD_DIR)/arch/x86/boot/bzImage
 SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
+MULTIKERNEL_QEMU := $(QEMU_BUILD_DIR)/qemu-system-x86_64
 
-.PHONY: all preflight config kernel kerf-runtime lazy-cma initrd build unit-test run test clean help FORCE
+.PHONY: all preflight config kernel qemu kerf-runtime lazy-cma initrd build unit-test run test clean help FORCE
 
 all: build
 
@@ -34,6 +41,7 @@ help:
 	  'make preflight    - validate submodules, tools, branch, and QEMU settings' \
 	  'make config       - generate and validate the minimal kernel config' \
 	  'make kernel       - build the kernel and modules' \
+	  'make qemu         - build the Multikernel QEMU binary' \
 	  'make kerf-runtime - assemble the Kerf/Python guest runtime' \
 	  'make lazy-cma     - build the contiguous-memory module and helper' \
 	  'make initrd       - build the host and secondary initramfs images' \
@@ -72,6 +80,22 @@ $(KERNEL): $(KBUILD_DIR)/.config $(HOST_DEPS)/.ready FORCE
 
 kernel: $(KERNEL)
 
+$(QEMU_DEPS)/.ready: $(ROOT)/scripts/prepare-qemu-deps.sh
+	'$<' '$(QEMU_DEPS_DIR)'
+
+qemu: $(QEMU_DEPS)/.ready
+	@if [[ ! -f '$(QEMU_BUILD_DIR)/build.ninja' ]]; then \
+		mkdir -p '$(QEMU_BUILD_DIR)'; \
+		cd '$(QEMU_BUILD_DIR)' && \
+		PATH='$(QEMU_DEPS)/usr/bin:/usr/local/bin:/usr/bin:/bin' \
+		PKG_CONFIG_SYSROOT_DIR='$(QEMU_DEPS)' \
+		PKG_CONFIG_PATH='$(QEMU_PKG_CONFIG_PATH)' \
+		../configure \
+			--target-list=x86_64-softmmu --enable-multikernel --disable-werror; \
+	fi
+	'$(QEMU_NINJA)' -C '$(QEMU_BUILD_DIR)' qemu-system-x86_64
+	test -x '$(MULTIKERNEL_QEMU)'
+
 $(KERF_RUNTIME)/.ready: $(ROOT)/scripts/prepare-kerf-runtime.sh $(ROOT)/scripts/rdtsc-init.py $(KERF_PYTHON_SOURCES) | preflight
 	'$<' '$(KERF_DIR)' '$(BUILD_DIR)' '$(PYTHON)'
 
@@ -94,11 +118,11 @@ $(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-init
 	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<' \
 		'$(KERF_RUNTIME)' '$(ROOT)/harness'
 
-$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh
+$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh qemu
 	'$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
 		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' \
 		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool' \
-		'$(ROOT)/harness'
+		'$(ROOT)/harness' '$(MULTIKERNEL_QEMU)'
 
 initrd: $(SECONDARY_INITRD) $(HOST_INITRD)
 

@@ -24,14 +24,15 @@ for applet in sh mount mkdir cat grep sleep poweroff timeout sync; do
 done
 
 if [[ "${mode}" == host ]]; then
-	[[ $# -eq 10 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE\n' >&2; exit 1; }
+	[[ $# -eq 11 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE QEMU_BINARY\n' >&2; exit 1; }
 	kerf_runtime=$5
 	kernel=$6
 	secondary_initrd=$7
 	lazy_cma_module=$8
 	lazy_cma_tool=$9
 	harness_package=${10}
-	mkdir -p "${root}/assets" "${root}/payload" "${root}/lib/modules"
+	qemu_binary=${11}
+	mkdir -p "${root}/assets" "${root}/payload" "${root}/lib/modules" "${root}/usr/bin"
 	cp -a "${kerf_runtime}/." "${root}/"
 	mkdir -p "${root}/usr/lib/python3/dist-packages/harness"
 	cp -a "${harness_package}/." "${root}/usr/lib/python3/dist-packages/harness/"
@@ -39,6 +40,10 @@ if [[ "${mode}" == host ]]; then
 	install -m 0644 "${secondary_initrd}" "${root}/payload/secondary-initrd.cpio.gz"
 	install -m 0644 "${lazy_cma_module}" "${root}/lib/modules/lazy_cma.ko"
 	install -m 0755 "${lazy_cma_tool}" "${root}/bin/lazy_cma_tool"
+	install -m 0755 "${qemu_binary}" "${root}/usr/bin/qemu-system-x86_64"
+	while IFS= read -r library; do
+		install -D -m 0755 "${library}" "${root}${library}"
+	done < <(ldd "${qemu_binary}" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
 elif [[ "${mode}" == secondary ]]; then
 	[[ $# -eq 6 ]] || { printf 'secondary mode requires PYTHON_RUNTIME HARNESS_PACKAGE\n' >&2; exit 1; }
 	python_runtime=$5
