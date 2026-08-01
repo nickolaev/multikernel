@@ -9,7 +9,7 @@ runtime="${build_dir}/kerf-runtime"
 packages="${build_dir}/kerf-packages"
 
 case "${runtime}" in
-	*/build/kerf-runtime) ;;
+	*/build/kerf-runtime|*/build/package-test/kerf-runtime) ;;
 	*) printf 'refusing unsafe runtime path: %s\n' "${runtime}" >&2; exit 1 ;;
 esac
 

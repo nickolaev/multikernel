@@ -7,6 +7,8 @@ LAZY_CMA_DIR ?= $(ROOT)/lazy_cma
 QEMU_DIR ?= $(ROOT)/qemu
 QEMU_BUILD_DIR ?= $(QEMU_DIR)/build-multikernel
 BUILD_DIR ?= $(ROOT)/build
+PREBUILT_KERNEL ?=
+PREBUILT_SECONDARY_KERNEL ?=
 QEMU_DEPS_DIR := $(BUILD_DIR)/qemu-deps
 QEMU_DEPS := $(QEMU_DEPS_DIR)/root
 QEMU_NINJA := $(QEMU_DEPS)/usr/bin/ninja
@@ -26,13 +28,42 @@ QEMU ?= $(shell command -v qemu-system-x86_64 2>/dev/null)
 LEX := $(shell command -v flex 2>/dev/null)
 YACC := $(shell command -v bison 2>/dev/null)
 
+ifeq ($(strip $(PREBUILT_KERNEL)),)
 KERNEL := $(KBUILD_DIR)/arch/x86/boot/bzImage
+else
+KERNEL := $(abspath $(PREBUILT_KERNEL))
+endif
+ifeq ($(strip $(PREBUILT_SECONDARY_KERNEL)),)
 SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
+else
+SECONDARY_KERNEL := $(abspath $(PREBUILT_SECONDARY_KERNEL))
+endif
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
 MULTIKERNEL_QEMU := $(QEMU_BUILD_DIR)/qemu-system-x86_64
 
-.PHONY: all preflight config kernel qemu kerf-runtime lazy-cma initrd build unit-test run test clean help FORCE
+APT_TRACK ?= vf-sriov-assign
+APT_BUILD_NUMBER ?= 1
+APT_DEB_ARCH ?= $(shell dpkg --print-architecture)
+APT_KERNEL_SHA := $(shell git -C '$(LINUX_DIR)' rev-parse --short=10 HEAD 2>/dev/null)
+APT_KERNEL_FULL_SHA := $(shell git -C '$(LINUX_DIR)' rev-parse HEAD 2>/dev/null)
+APT_KERNEL_BASE := $(shell $(MAKE) -s -C '$(LINUX_DIR)' kernelversion 2>/dev/null)
+APT_TRACK_VERSION := $(subst -,.,$(APT_TRACK))
+APT_LOCALVERSION := -999-mk-$(APT_TRACK)-g$(APT_KERNEL_SHA)
+APT_KERNEL_RELEASE := $(APT_KERNEL_BASE)$(APT_LOCALVERSION)
+APT_DEB_VERSION := $(subst -rc,~rc,$(APT_KERNEL_BASE))-999.$(APT_BUILD_NUMBER)+mk.$(APT_TRACK_VERSION).g$(APT_KERNEL_SHA)
+APT_DEB_DIR := $(ROOT)/build/debs
+APT_KBUILD_DIR := $(APT_DEB_DIR)/kernel
+APT_IMAGE_DEB := $(APT_DEB_DIR)/linux-image-$(APT_KERNEL_RELEASE)_$(APT_DEB_VERSION)_$(APT_DEB_ARCH).deb
+APT_SECONDARY_PACKAGE := linux-multikernel-secondary-$(APT_KERNEL_RELEASE)
+APT_SECONDARY_DEB := $(APT_DEB_DIR)/$(APT_SECONDARY_PACKAGE)_$(APT_DEB_VERSION)_$(APT_DEB_ARCH).deb
+APT_PACKAGE_ROOT := $(ROOT)/build/package-root
+APT_PACKAGE_TEST_BUILD_DIR := $(ROOT)/build/package-test
+APT_PACKAGE_KERNEL := $(APT_PACKAGE_TEST_BUILD_DIR)/kernel/arch/x86/boot/bzImage
+APT_PACKAGE_SECONDARY_KERNEL := $(APT_PACKAGE_TEST_BUILD_DIR)/kernel/vmlinux
+
+.PHONY: all preflight config kernel qemu kerf-runtime lazy-cma initrd build unit-test run test \
+	deb-preflight deb-kernel deb-extract test-deb clean help FORCE
 
 all: build
 
@@ -49,6 +80,9 @@ help:
 	  'make unit-test    - run the Python harness unit tests' \
 	  'make run          - run QEMU interactively on the serial console' \
 	  'make test         - run QEMU and assert all proof markers' \
+	  'make deb-kernel   - build SHA-named local Linux and secondary .deb packages' \
+	  'make deb-extract  - extract the local .deb packages into an isolated root' \
+	  'make test-deb     - run the QEMU harness against extracted .deb payloads' \
 	  'make clean        - remove only the top-level build directory'
 
 preflight:
@@ -72,11 +106,13 @@ $(HOST_DEPS)/.ready: $(ROOT)/scripts/prepare-host-deps.sh
 
 FORCE:
 
+ifeq ($(strip $(PREBUILT_KERNEL)),)
 $(KERNEL): $(KBUILD_DIR)/.config $(HOST_DEPS)/.ready FORCE
 	$(MAKE) -C '$(LINUX_DIR)' O='$(KBUILD_DIR)' LEX='$(LEX)' YACC='$(YACC)' \
 		HOSTCFLAGS='-I$(HOST_DEPS)/usr/include' \
 		HOSTLDFLAGS='-L$(HOST_DEPS)/usr/lib/x86_64-linux-gnu' \
 		-j'$(JOBS)' bzImage modules
+endif
 
 kernel: $(KERNEL)
 
@@ -133,11 +169,56 @@ build: preflight kernel kerf-runtime initrd
 unit-test:
 	'$(PYTHON)' -m unittest discover -s '$(ROOT)/tests' -v
 
+deb-preflight:
+	@ALLOW_OTHER_BRANCH=1 LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' \
+		LAZY_CMA_DIR='$(LAZY_CMA_DIR)' BUSYBOX='$(BUSYBOX)' QEMU='$(QEMU)' \
+		CC='$(CC)' PYTHON='$(PYTHON)' LEX='$(LEX)' YACC='$(YACC)' \
+		'$(ROOT)/scripts/preflight.sh'
+	'$(ROOT)/scripts/check-deb-build-deps.sh'
+
+ifneq ($(abspath $(KBUILD_DIR)),$(abspath $(APT_KBUILD_DIR)))
+$(APT_KBUILD_DIR)/.config: $(ROOT)/config/multikernel-qemu.config | deb-preflight
+	@mkdir -p '$(APT_KBUILD_DIR)'
+	$(MAKE) -C '$(LINUX_DIR)' O='$(APT_KBUILD_DIR)' LEX='$(LEX)' YACC='$(YACC)' tinyconfig
+	'$(LINUX_DIR)/scripts/kconfig/merge_config.sh' -m -O '$(APT_KBUILD_DIR)' \
+		'$(APT_KBUILD_DIR)/.config' '$<'
+	$(MAKE) -C '$(LINUX_DIR)' O='$(APT_KBUILD_DIR)' LEX='$(LEX)' YACC='$(YACC)' olddefconfig
+	'$(ROOT)/scripts/check-config.sh' '$(APT_KBUILD_DIR)/.config'
+
+endif
+deb-kernel: $(APT_KBUILD_DIR)/.config
+	@case '$(APT_TRACK)' in (*[!a-z0-9.+-]*|'') \
+		printf 'invalid APT_TRACK: %s\n' '$(APT_TRACK)' >&2; exit 1;; esac
+	DEBFULLNAME='Multikernel Build' DEBEMAIL='multikernel@localhost.invalid' \
+		$(MAKE) -C '$(LINUX_DIR)' O='$(APT_KBUILD_DIR)' \
+		LEX='$(LEX)' YACC='$(YACC)' LOCALVERSION='$(APT_LOCALVERSION)' \
+		KDEB_PKGVERSION='$(APT_DEB_VERSION)' \
+		KDEB_SOURCENAME='linux-multikernel-$(APT_TRACK)' \
+		KDEB_CHANGELOG_DIST='resolute' -j'$(JOBS)' bindeb-pkg
+	'$(ROOT)/scripts/build-secondary-deb.sh' '$(APT_DEB_DIR)' \
+		'$(APT_KBUILD_DIR)/vmlinux' '$(APT_KERNEL_RELEASE)' '$(APT_DEB_VERSION)' \
+		'$(APT_TRACK)' '$(APT_KERNEL_FULL_SHA)' '$(APT_DEB_ARCH)'
+	test -f '$(APT_IMAGE_DEB)'
+	test -f '$(APT_SECONDARY_DEB)'
+	@printf 'MK_DEB_BUILD_OK track=%s kernel_release=%s sha=%s image=%s secondary=%s\n' \
+		'$(APT_TRACK)' '$(APT_KERNEL_RELEASE)' '$(APT_KERNEL_FULL_SHA)' \
+		'$(APT_IMAGE_DEB)' '$(APT_SECONDARY_DEB)'
+
+deb-extract: deb-kernel
+	'$(ROOT)/scripts/extract-local-debs.sh' '$(APT_IMAGE_DEB)' '$(APT_SECONDARY_DEB)' \
+		'$(APT_PACKAGE_ROOT)' '$(APT_PACKAGE_TEST_BUILD_DIR)' '$(APT_KERNEL_RELEASE)'
+
+test-deb: deb-extract
+	$(MAKE) ALLOW_OTHER_BRANCH=1 BUILD_DIR='$(APT_PACKAGE_TEST_BUILD_DIR)' \
+		KBUILD_DIR='$(APT_KBUILD_DIR)' HOST_DEPS='$(HOST_DEPS)' \
+		QEMU_DEPS_DIR='$(QEMU_DEPS_DIR)' PREBUILT_KERNEL='$(APT_PACKAGE_KERNEL)' \
+		PREBUILT_SECONDARY_KERNEL='$(APT_PACKAGE_SECONDARY_KERNEL)' test
+
 run: build
-	PYTHON='$(PYTHON)' QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' run
+	BUILD_DIR='$(BUILD_DIR)' PYTHON='$(PYTHON)' QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' run
 
 test: unit-test build
-	PYTHON='$(PYTHON)' QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' test
+	BUILD_DIR='$(BUILD_DIR)' PYTHON='$(PYTHON)' QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' test
 
 clean:
 	rm -rf -- '$(BUILD_DIR)'

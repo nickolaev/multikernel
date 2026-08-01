@@ -96,6 +96,46 @@ timeout. At least five CPUs and 7168 MiB are required. The primary allocates a
 additional lease instances reserve CPUs 3 and 4 and 256 MiB each while they are
 in the ready state.
 
+## Local Debian package proof
+
+The `apt_repo` branch can build real Debian kernel packages and then run the
+QEMU harness against files extracted from those packages. Install the build
+dependencies once on Ubuntu 26.04:
+
+```sh
+sudo apt update
+sudo apt install debhelper libdw-dev libelf-dev
+```
+
+Build the packages:
+
+```sh
+make deb-kernel
+```
+
+The default track is `vf-sriov-assign`. Override the track or monotonically
+increasing package build number when needed:
+
+```sh
+make deb-kernel APT_TRACK=mk-kernel APT_BUILD_NUMBER=2
+```
+
+Each kernel release contains the track and the first ten hexadecimal digits of
+the pinned Linux commit, for example
+`6.19.0-rc5-999-mk-vf-sriov-assign-g5efa61c386`. Packages are written under
+`build/debs/`.
+
+Run the complete harness against the package-extracted host kernel and
+secondary ELF image:
+
+```sh
+make test-deb
+```
+
+This first packaging proof intentionally uses the existing minimal QEMU kernel
+configuration. It validates Debian package construction and consumption; it
+does not yet claim to be the Ubuntu generic production configuration.
+
 ## Make targets
 
 | Target | Result |
@@ -109,6 +149,9 @@ in the ready state.
 | `make build` | Build all required artifacts. |
 | `make run` | Boot QEMU with an interactive serial console. |
 | `make test` | Boot QEMU and validate the complete proof sequence. |
+| `make deb-kernel` | Build SHA-named local Linux and secondary packages. |
+| `make deb-extract` | Extract package payloads into an isolated staging root. |
+| `make test-deb` | Run the harness against the extracted package payloads. |
 | `make clean` | Remove only the top-level `build/` directory. |
 
 Important artifacts:
