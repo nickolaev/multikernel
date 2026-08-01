@@ -1,0 +1,120 @@
+name: Build and publish APT repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      track:
+        description: Package track name
+        required: true
+        default: vf-sriov-assign
+      build_number:
+        description: Monotonically increasing rebuild number
+        required: true
+        default: "1"
+
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    env:
+      APT_TRACK: ${{ inputs.track }}
+      APT_BUILD_NUMBER: ${{ inputs.build_number }}
+      QEMU_CPUS: "6"
+      QEMU_MEMORY_MB: "8192"
+      QEMU_TIMEOUT: "900"
+    steps:
+      - name: Check out pinned component sources
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Ubuntu 26.04 build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bc bison build-essential busybox-static cpio debhelper dpkg-dev \
+            flex libdw-dev libelf-dev libssl-dev meson ninja-build \
+            python3-pip qemu-system-x86
+
+      - name: Validate release inputs
+        run: |
+          case "${APT_TRACK}" in
+            ""|*[!a-z0-9.+-]*) printf 'invalid track: %s\n' "${APT_TRACK}" >&2; exit 1 ;;
+          esac
+          case "${APT_BUILD_NUMBER}" in
+            ""|*[!0-9]*) printf 'invalid build number: %s\n' "${APT_BUILD_NUMBER}" >&2; exit 1 ;;
+          esac
+
+      - name: Build packages and run package-backed harness
+        run: make test-deb
+
+      - name: Import repository signing key
+        env:
+          APT_REPO_GPG_PRIVATE_KEY: ${{ secrets.APT_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          test -n "${APT_REPO_GPG_PRIVATE_KEY}"
+          printf '%s' "${APT_REPO_GPG_PRIVATE_KEY}" | gpg --batch --import
+          fingerprint=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          test -n "${fingerprint}"
+          printf 'APT_SIGNING_KEY=%s\n' "${fingerprint}" >>"${GITHUB_ENV}"
+
+      - name: Build signed current package repository
+        env:
+          APT_REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: make apt-repo
+
+      - name: Retain package set as a GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          linux_sha=$(git -C linux rev-parse --short=10 HEAD)
+          tag="apt-${APT_TRACK}-${linux_sha}-b${APT_BUILD_NUMBER}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" build/apt-repo/pool/main/m/multikernel/*.deb --clobber
+          else
+            gh release create "${tag}" build/apt-repo/pool/main/m/multikernel/*.deb \
+              --target "${GITHUB_SHA}" \
+              --title "Multikernel ${APT_TRACK} ${linux_sha} build ${APT_BUILD_NUMBER}" \
+              --notes "Ubuntu 26.04 Multikernel package set."
+          fi
+
+      - name: Rebuild repository from retained releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APT_REPO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          mkdir -p build/all-release-debs
+          gh release list --limit 1000 --json tagName --jq '.[].tagName' | while read -r tag; do
+            case "${tag}" in
+              apt-*) gh release download "${tag}" --pattern '*.deb' --dir build/all-release-debs --clobber ;;
+            esac
+          done
+          scripts/build-apt-repo.sh build/apt-repo resolute amd64 build/all-release-debs/*.deb
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/apt-repo
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-26.04
+    needs: build
+    steps:
+      - name: Deploy repository to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

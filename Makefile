@@ -9,6 +9,8 @@ QEMU_BUILD_DIR ?= $(QEMU_DIR)/build-multikernel
 BUILD_DIR ?= $(ROOT)/build
 PREBUILT_KERNEL ?=
 PREBUILT_SECONDARY_KERNEL ?=
+PREBUILT_HOST_INITRD ?=
+PREBUILT_SECONDARY_INITRD ?=
 QEMU_DEPS_DIR := $(BUILD_DIR)/qemu-deps
 QEMU_DEPS := $(QEMU_DEPS_DIR)/root
 QEMU_NINJA := $(QEMU_DEPS)/usr/bin/ninja
@@ -38,8 +40,16 @@ SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
 else
 SECONDARY_KERNEL := $(abspath $(PREBUILT_SECONDARY_KERNEL))
 endif
+ifeq ($(strip $(PREBUILT_SECONDARY_INITRD)),)
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
+else
+SECONDARY_INITRD := $(abspath $(PREBUILT_SECONDARY_INITRD))
+endif
+ifeq ($(strip $(PREBUILT_HOST_INITRD)),)
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
+else
+HOST_INITRD := $(abspath $(PREBUILT_HOST_INITRD))
+endif
 MULTIKERNEL_QEMU := $(QEMU_BUILD_DIR)/qemu-system-x86_64
 
 APT_TRACK ?= vf-sriov-assign
@@ -48,6 +58,14 @@ APT_DEB_ARCH ?= $(shell dpkg --print-architecture)
 APT_KERNEL_SHA := $(shell git -C '$(LINUX_DIR)' rev-parse --short=10 HEAD 2>/dev/null)
 APT_KERNEL_FULL_SHA := $(shell git -C '$(LINUX_DIR)' rev-parse HEAD 2>/dev/null)
 APT_KERNEL_BASE := $(shell $(MAKE) -s -C '$(LINUX_DIR)' kernelversion 2>/dev/null)
+APT_KERF_SHA := $(shell git -C '$(KERF_DIR)' rev-parse --short=10 HEAD 2>/dev/null)
+APT_KERF_FULL_SHA := $(shell git -C '$(KERF_DIR)' rev-parse HEAD 2>/dev/null)
+APT_QEMU_SHA := $(shell git -C '$(QEMU_DIR)' rev-parse --short=10 HEAD 2>/dev/null)
+APT_QEMU_FULL_SHA := $(shell git -C '$(QEMU_DIR)' rev-parse HEAD 2>/dev/null)
+APT_LAZY_CMA_SHA := $(shell git -C '$(LAZY_CMA_DIR)' rev-parse --short=10 HEAD 2>/dev/null)
+APT_LAZY_CMA_FULL_SHA := $(shell git -C '$(LAZY_CMA_DIR)' rev-parse HEAD 2>/dev/null)
+APT_HARNESS_SHA := $(shell git -C '$(ROOT)' rev-parse --short=10 HEAD 2>/dev/null)
+APT_HARNESS_FULL_SHA := $(shell git -C '$(ROOT)' rev-parse HEAD 2>/dev/null)
 APT_TRACK_VERSION := $(subst -,.,$(APT_TRACK))
 APT_LOCALVERSION := -999-mk-$(APT_TRACK)-g$(APT_KERNEL_SHA)
 APT_KERNEL_RELEASE := $(APT_KERNEL_BASE)$(APT_LOCALVERSION)
@@ -57,13 +75,26 @@ APT_KBUILD_DIR := $(APT_DEB_DIR)/kernel
 APT_IMAGE_DEB := $(APT_DEB_DIR)/linux-image-$(APT_KERNEL_RELEASE)_$(APT_DEB_VERSION)_$(APT_DEB_ARCH).deb
 APT_SECONDARY_PACKAGE := linux-multikernel-secondary-$(APT_KERNEL_RELEASE)
 APT_SECONDARY_DEB := $(APT_DEB_DIR)/$(APT_SECONDARY_PACKAGE)_$(APT_DEB_VERSION)_$(APT_DEB_ARCH).deb
+APT_HEADERS_DEB := $(APT_DEB_DIR)/linux-headers-$(APT_KERNEL_RELEASE)_$(APT_DEB_VERSION)_$(APT_DEB_ARCH).deb
+APT_INITRAMFS_VERSION := $(APT_DEB_VERSION).h$(APT_HARNESS_SHA).k$(APT_KERF_SHA).q$(APT_QEMU_SHA).l$(APT_LAZY_CMA_SHA)
+APT_INITRAMFS_PACKAGE := multikernel-initramfs-$(APT_KERNEL_RELEASE)
+APT_INITRAMFS_DEB := $(APT_DEB_DIR)/$(APT_INITRAMFS_PACKAGE)_$(APT_INITRAMFS_VERSION)_$(APT_DEB_ARCH).deb
+APT_META_PACKAGE := multikernel-$(APT_TRACK)
+APT_META_DEB := $(APT_DEB_DIR)/$(APT_META_PACKAGE)_$(APT_INITRAMFS_VERSION)_all.deb
+APT_INITRAMFS_BUILD_DIR := $(APT_DEB_DIR)/initramfs-build
+APT_INITRAMFS_HOST := $(APT_INITRAMFS_BUILD_DIR)/host-initrd.cpio.gz
+APT_INITRAMFS_SECONDARY := $(APT_INITRAMFS_BUILD_DIR)/secondary-initrd.cpio.gz
 APT_PACKAGE_ROOT := $(ROOT)/build/package-root
 APT_PACKAGE_TEST_BUILD_DIR := $(ROOT)/build/package-test
 APT_PACKAGE_KERNEL := $(APT_PACKAGE_TEST_BUILD_DIR)/kernel/arch/x86/boot/bzImage
 APT_PACKAGE_SECONDARY_KERNEL := $(APT_PACKAGE_TEST_BUILD_DIR)/kernel/vmlinux
+APT_PACKAGE_HOST_INITRD := $(APT_PACKAGE_TEST_BUILD_DIR)/host-initrd.cpio.gz
+APT_PACKAGE_SECONDARY_INITRD := $(APT_PACKAGE_TEST_BUILD_DIR)/secondary-initrd.cpio.gz
+APT_REPO_DIR ?= $(ROOT)/build/apt-repo
+APT_REPO_CODENAME ?= resolute
 
 .PHONY: all preflight config kernel qemu kerf-runtime lazy-cma initrd build unit-test run test \
-	deb-preflight deb-kernel deb-extract test-deb clean help FORCE
+	deb-preflight deb-kernel deb-initramfs deb-packages deb-extract apt-repo test-deb clean help FORCE
 
 all: build
 
@@ -81,8 +112,11 @@ help:
 	  'make run          - run QEMU interactively on the serial console' \
 	  'make test         - run QEMU and assert all proof markers' \
 	  'make deb-kernel   - build SHA-named local Linux and secondary .deb packages' \
+	  'make deb-initramfs - build the SHA-versioned host/secondary initramfs package' \
+	  'make deb-packages - build kernel, initramfs, and install metapackage .debs' \
 	  'make deb-extract  - extract the local .deb packages into an isolated root' \
 	  'make test-deb     - run the QEMU harness against extracted .deb payloads' \
+	  'make apt-repo     - generate a local resolute APT repository' \
 	  'make clean        - remove only the top-level build directory'
 
 preflight:
@@ -149,16 +183,20 @@ $(LAZY_CMA_BUILD)/.ready: $(KERNEL) $(ROOT)/config/lazy-cma.Kbuild $(LAZY_CMA_SO
 
 lazy-cma: $(LAZY_CMA_BUILD)/.ready
 
+ifeq ($(strip $(PREBUILT_SECONDARY_INITRD)),)
 $(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-initramfs.sh \
 		$(KERF_RUNTIME)/.ready $(HARNESS_PYTHON_SOURCES) | preflight
 	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<' \
 		'$(KERF_RUNTIME)' '$(ROOT)/harness'
+endif
 
+ifeq ($(strip $(PREBUILT_HOST_INITRD)),)
 $(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh qemu
 	'$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
 		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' \
 		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool' \
 		'$(ROOT)/harness' '$(MULTIKERNEL_QEMU)'
+endif
 
 initrd: $(SECONDARY_INITRD) $(HOST_INITRD)
 
@@ -204,15 +242,49 @@ deb-kernel: $(APT_KBUILD_DIR)/.config
 		'$(APT_TRACK)' '$(APT_KERNEL_RELEASE)' '$(APT_KERNEL_FULL_SHA)' \
 		'$(APT_IMAGE_DEB)' '$(APT_SECONDARY_DEB)'
 
-deb-extract: deb-kernel
-	'$(ROOT)/scripts/extract-local-debs.sh' '$(APT_IMAGE_DEB)' '$(APT_SECONDARY_DEB)' \
+deb-initramfs: deb-kernel
+	$(MAKE) ALLOW_OTHER_BRANCH=1 BUILD_DIR='$(APT_INITRAMFS_BUILD_DIR)' \
+		KBUILD_DIR='$(APT_KBUILD_DIR)' HOST_DEPS='$(HOST_DEPS)' QEMU_DEPS_DIR='$(QEMU_DEPS_DIR)' \
+		PREBUILT_KERNEL='$(APT_KBUILD_DIR)/arch/x86/boot/bzImage' \
+		PREBUILT_SECONDARY_KERNEL='$(APT_KBUILD_DIR)/vmlinux' initrd
+	'$(ROOT)/scripts/build-initramfs-deb.sh' '$(APT_DEB_DIR)' \
+		'$(APT_INITRAMFS_HOST)' '$(APT_INITRAMFS_SECONDARY)' \
+		'$(APT_KERNEL_RELEASE)' '$(APT_INITRAMFS_VERSION)' '$(APT_DEB_VERSION)' \
+		'$(APT_TRACK)' '$(APT_KERNEL_FULL_SHA)' '$(APT_KERF_FULL_SHA)' \
+		'$(APT_QEMU_FULL_SHA)' '$(APT_LAZY_CMA_FULL_SHA)' \
+		'$(APT_HARNESS_FULL_SHA)' '$(APT_DEB_ARCH)'
+	test -f '$(APT_INITRAMFS_DEB)'
+
+deb-packages: deb-initramfs
+	'$(ROOT)/scripts/build-meta-deb.sh' '$(APT_DEB_DIR)' '$(APT_META_PACKAGE)' \
+		'$(APT_INITRAMFS_VERSION)' '$(APT_KERNEL_RELEASE)' '$(APT_DEB_VERSION)' \
+		'$(APT_INITRAMFS_PACKAGE)' '$(APT_TRACK)'
+	test -f '$(APT_IMAGE_DEB)'
+	test -f '$(APT_HEADERS_DEB)'
+	test -f '$(APT_SECONDARY_DEB)'
+	test -f '$(APT_INITRAMFS_DEB)'
+	test -f '$(APT_META_DEB)'
+	@printf 'MK_DEB_SET_OK meta=%s version=%s linux_sha=%s kerf_sha=%s qemu_sha=%s lazy_cma_sha=%s harness_sha=%s\n' \
+		'$(APT_META_PACKAGE)' '$(APT_INITRAMFS_VERSION)' '$(APT_KERNEL_SHA)' \
+		'$(APT_KERF_SHA)' '$(APT_QEMU_SHA)' '$(APT_LAZY_CMA_SHA)' '$(APT_HARNESS_SHA)'
+
+deb-extract: deb-packages
+	'$(ROOT)/scripts/extract-local-debs.sh' '$(APT_IMAGE_DEB)' '$(APT_SECONDARY_DEB)' '$(APT_INITRAMFS_DEB)' \
 		'$(APT_PACKAGE_ROOT)' '$(APT_PACKAGE_TEST_BUILD_DIR)' '$(APT_KERNEL_RELEASE)'
+
+apt-repo: deb-packages
+	APT_REPO_URL='$(APT_REPO_URL)' APT_SIGNING_KEY='$(APT_SIGNING_KEY)' \
+		'$(ROOT)/scripts/build-apt-repo.sh' '$(APT_REPO_DIR)' '$(APT_REPO_CODENAME)' \
+		'$(APT_DEB_ARCH)' '$(APT_IMAGE_DEB)' '$(APT_HEADERS_DEB)' '$(APT_SECONDARY_DEB)' \
+		'$(APT_INITRAMFS_DEB)' '$(APT_META_DEB)'
 
 test-deb: deb-extract
 	$(MAKE) ALLOW_OTHER_BRANCH=1 BUILD_DIR='$(APT_PACKAGE_TEST_BUILD_DIR)' \
 		KBUILD_DIR='$(APT_KBUILD_DIR)' HOST_DEPS='$(HOST_DEPS)' \
 		QEMU_DEPS_DIR='$(QEMU_DEPS_DIR)' PREBUILT_KERNEL='$(APT_PACKAGE_KERNEL)' \
-		PREBUILT_SECONDARY_KERNEL='$(APT_PACKAGE_SECONDARY_KERNEL)' test
+		PREBUILT_SECONDARY_KERNEL='$(APT_PACKAGE_SECONDARY_KERNEL)' \
+		PREBUILT_HOST_INITRD='$(APT_PACKAGE_HOST_INITRD)' \
+		PREBUILT_SECONDARY_INITRD='$(APT_PACKAGE_SECONDARY_INITRD)' test
 
 run: build
 	BUILD_DIR='$(BUILD_DIR)' PYTHON='$(PYTHON)' QEMU='$(QEMU)' '$(ROOT)/scripts/run-qemu.sh' run

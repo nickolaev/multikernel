@@ -123,7 +123,9 @@ make deb-kernel APT_TRACK=mk-kernel APT_BUILD_NUMBER=2
 Each kernel release contains the track and the first ten hexadecimal digits of
 the pinned Linux commit, for example
 `6.19.0-rc5-999-mk-vf-sriov-assign-g5efa61c386`. Packages are written under
-`build/debs/`.
+`build/debs/`. `make deb-packages` also produces an initramfs package whose
+version records the harness, Kerf, embedded QEMU, and lazy-CMA SHAs, plus a `multikernel-<track>`
+metapackage that installs the exactly matched set.
 
 Run the complete harness against the package-extracted host kernel and
 secondary ELF image:
@@ -131,6 +133,18 @@ secondary ELF image:
 ```sh
 make test-deb
 ```
+
+Generate a local APT repository:
+
+```sh
+make apt-repo
+```
+
+The repository is written to `build/apt-repo` for Ubuntu 26.04 (`resolute`).
+Set `APT_SIGNING_KEY` to a local GPG key fingerprint to create `InRelease` and
+`Release.gpg`; unsigned output is allowed only for local validation. The GitHub
+Actions publisher requires a signing key and publishes the repository through
+GitHub Pages while retaining each package set as GitHub Release assets.
 
 This first packaging proof intentionally uses the existing minimal QEMU kernel
 configuration. It validates Debian package construction and consumption; it
@@ -150,8 +164,11 @@ does not yet claim to be the Ubuntu generic production configuration.
 | `make run` | Boot QEMU with an interactive serial console. |
 | `make test` | Boot QEMU and validate the complete proof sequence. |
 | `make deb-kernel` | Build SHA-named local Linux and secondary packages. |
+| `make deb-initramfs` | Build the host/secondary initramfs package. |
+| `make deb-packages` | Build all packages plus the track metapackage. |
 | `make deb-extract` | Extract package payloads into an isolated staging root. |
 | `make test-deb` | Run the harness against the extracted package payloads. |
+| `make apt-repo` | Generate the local Ubuntu 26.04 APT repository. |
 | `make clean` | Remove only the top-level `build/` directory. |
 
 Important artifacts:

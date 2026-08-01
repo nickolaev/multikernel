@@ -10,6 +10,7 @@ root="${build_dir}/initramfs-${mode}"
 
 case "${root}" in
 	*/build/initramfs-host|*/build/initramfs-secondary|\
+	*/build/debs/initramfs-build/initramfs-host|*/build/debs/initramfs-build/initramfs-secondary|\
 	*/build/package-test/initramfs-host|*/build/package-test/initramfs-secondary) ;;
 	*) printf 'refusing unsafe staging path: %s\n' "${root}" >&2; exit 1 ;;
 esac
