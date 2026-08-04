@@ -15,8 +15,10 @@ The automated test passes only after it verifies that:
   domains while the other five VFs remain host-owned;
 - the active secondary sees only its assigned VF, binds `igbvf`, exchanges
   traffic with its backend, and reaches the primary PF address;
+- the active secondary can be force-stopped and execute the same loaded image
+  again, with the VF reset and its datapath restored before teardown;
 - PF assignment, duplicate ownership, VF disable, driver rebind, reprobe, and
-  surprise-unbind attacks fail closed;
+  surprise-unbind control-plane operations fail closed;
 - deleting each instance restores the original host driver and ownership; and
 - repeated lease cycles leave the primary and PF datapath operational.
 
@@ -133,6 +135,7 @@ MK_SECONDARY_VF_ENUMERATED ...
 MK_SECONDARY_VF_DATAPATH ...
 MK_SECONDARY_PRIMARY_REACHABLE ...
 MK_SECONDARY_ALIVE ...
+MK_RESTART_VF_DATAPATH_PASS instance=1 ...
 MK_PRIMARY_STILL_ALIVE ...
 MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=1 ...
 MK_COMPLEX_UNASSIGNED_VFS_INTACT count=5 families=3 owner=host
@@ -151,8 +154,8 @@ QEMU's IGB model is useful for SR-IOV functional testing but does not implement
 every hardware behavior. The harness therefore makes two separate claims:
 
 - QEMU verifies multi-PF inventory, concurrent VF lease ownership, distinct
-  IOMMU-domain setup, hostile control-plane operations, rollback, restoration,
-  and one complete VF datapath.
+  IOMMU-domain setup, adverse host control-plane operations, rollback,
+  restoration, instance restart, and one complete VF datapath.
 - Physical hardware must verify multiple simultaneously active VF datapaths,
   sustained and bidirectional DMA load, device reset behavior, interrupt
   isolation, mixed NIC models, and PCI bridge or slot removal.
@@ -161,6 +164,13 @@ The QEMU model and its stated limitations are documented in
 [QEMU's IGB device documentation](https://www.qemu.org/docs/master/system/devices/igb.html).
 The harness does not add kernel behavior solely to accommodate an emulated
 device topology.
+
+A passing QEMU run does not establish isolation from a malicious spawned
+kernel. The spawned kernel is privileged and can bypass its normal PCI config
+paths. The config wrapper is a cooperative guardrail; the host-owned IOMMU
+domain is the hardware DMA boundary. QEMU also does not validate production
+ownership and programming of interrupt-remapping entries, which remains part
+of the host-mediated control-plane follow-up.
 
 This remains a feasibility and regression harness for x86 QEMU TCG. It is not
 a production kernel configuration and intentionally disables optional x86 IBT

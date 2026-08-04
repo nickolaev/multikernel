@@ -12,6 +12,7 @@ die() {
 [[ -f "${LAZY_CMA_DIR}/lazy_cma.c" ]] || die "${LAZY_CMA_DIR} is not a lazy_cma source tree"
 
 branch=$(git -C "${LINUX_DIR}" branch --show-current)
+linux_head=$(git -C "${LINUX_DIR}" rev-parse --short=12 HEAD)
 if [[ "${branch}" != mk-master && "${ALLOW_OTHER_BRANCH:-0}" != 1 ]]; then
 	die "expected linux branch mk-master, found ${branch}; set ALLOW_OTHER_BRANCH=1 to override"
 fi
@@ -46,5 +47,5 @@ done
 (( ${QEMU_MEMORY_MB:-6144} >= 5120 )) || die "QEMU_MEMORY_MB must be at least 5120 for lazy_cma to allocate from ZONE_NORMAL"
 (( ${QEMU_TIMEOUT:-600} >= 30 )) || die "QEMU_TIMEOUT must be at least 30 seconds"
 
-printf 'MK_PREFLIGHT_OK branch=%s cc=%s flex=%s bison=%s python=%s busybox=%s qemu=%s\n' \
-	"${branch}" "${CC}" "${LEX}" "${YACC}" "${PYTHON}" "${BUSYBOX}" "${QEMU}"
+printf 'MK_PREFLIGHT_OK branch=%s head=%s cc=%s flex=%s bison=%s python=%s busybox=%s qemu=%s\n' \
+	"${branch}" "${linux_head}" "${CC}" "${LEX}" "${YACC}" "${PYTHON}" "${BUSYBOX}" "${QEMU}"

@@ -624,6 +624,16 @@ class PrimaryScenario:
                 f"MK_HOSTILE_LEASE_PERSISTED phase=after-kill vf={vf.bdf} "
                 f"owner={ASSIGNMENT_DRIVER}"
             )
+            kerf("exec", "qemu-demo", stage="kerf-restart-exec")
+            self.expect_status("qemu-demo", 1, "active")
+            self.wait_for_secondary(console)
+            self.assert_vf_owner(ASSIGNMENT_DRIVER, "restart-active")
+            emit(
+                f"MK_RESTART_VF_DATAPATH_PASS instance=1 vf={vf.bdf} "
+                "reset=verified traffic=verified"
+            )
+            kerf("kill", "qemu-demo", stage="kerf-restart-kill")
+            self.expect_status("qemu-demo", 1, "loaded")
             kerf("unload", "qemu-demo", stage="kerf-unload")
             emit("MK_STAGE_KERF_UNLOAD_OK id=1")
             self.expect_status("qemu-demo", 1, "ready")
