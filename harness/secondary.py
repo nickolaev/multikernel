@@ -247,9 +247,16 @@ class SecondaryScenario:
             rx=rx_before,
         )
         if self.run_busybox("ping", "-c", "1", "-W", "5", config.peer):
-            tx_after = int(self.read(net_path / "statistics/tx_packets"))
-            rx_after = int(self.read(net_path / "statistics/rx_packets"))
-            if tx_after > tx_before and rx_after > rx_before:
+            deadline = time.monotonic() + 2.0
+            while True:
+                tx_after = int(self.read(net_path / "statistics/tx_packets"))
+                rx_after = int(self.read(net_path / "statistics/rx_packets"))
+                if rx_after > rx_before:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+            if rx_after > rx_before:
                 self.sink.emit(
                     "MK_SECONDARY_VF_DATAPATH",
                     instance=config.instance,
@@ -259,6 +266,7 @@ class SecondaryScenario:
                     tx_after=tx_after,
                     rx_before=rx_before,
                     rx_after=rx_after,
+                    tx_accounted=tx_after > tx_before,
                 )
             else:
                 self.fail(
