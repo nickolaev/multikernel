@@ -49,10 +49,16 @@ REQUIRED_MARKERS = (
     "MK_SECONDARY_VF_TRAFFIC_BEFORE instance=1 netdev=",
     "MK_SECONDARY_VF_DATAPATH instance=1 netdev=",
     "MK_SECONDARY_PRIMARY_REACHABLE instance=1 netdev=",
+    "MK_SECONDARY_VF_REBIND_PASS instance=1 bdf=0000:00:12.0",
+    "MK_SECONDARY_VF_FLR_PASS instance=1 bdf=0000:00:12.0",
+    "MK_SECONDARY_PCI_CONFIG_STRESS_READY instance=1 reads=64",
+    "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS instance=1 reads=",
     "MK_SECONDARY_ALIVE",
+    "MK_CONCURRENT_CPU_PCI_RPC_PASS cycles=3",
     "MK_PRIMARY_STILL_ALIVE",
     "MK_STAGE_PF_ACTIVE pf=0000:00:02.0 driver=igb",
     "MK_STAGE_KERF_KILL_OK",
+    "MK_HALTED_IRQ_QUIESCE_PASS instance=1 vectors=3",
     "MK_STAGE_KERF_UNLOAD_OK",
     "MK_STAGE_KERF_DELETE_OK",
     "MK_STAGE_VF_RESTORED",
@@ -92,12 +98,24 @@ REQUIRED_MARKERS = (
 FAILURE_MARKERS = ("MK_DEMO_FAIL", "MK_SECONDARY_FAIL")
 REQUIRED_EVENT_NAMES = (
     "MK_STAGE_IOMMU_DOMAIN",
+    "MK_SECONDARY_PCI_CONFIG_STRESS_READY",
+    "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS",
+    "MK_SECONDARY_VF_REBIND_PASS",
+    "MK_SECONDARY_VF_FLR_PASS",
     "MK_SECONDARY_ALIVE",
+    "MK_CONCURRENT_CPU_PCI_RPC_PASS",
+    "MK_HALTED_IRQ_QUIESCE_PASS",
     "MK_RESTART_VF_DATAPATH_PASS",
     "MK_COMPLEX_CONCURRENT_LEASES_PASS",
     "MK_COMPLEX_RESTORED",
     "MK_DEMO_PASS",
 )
+MIN_CPUSET_GROWTH_CPUS = 9
+REQUIRED_TOPOLOGY_MARKERS = (
+    "setup_percpu: NR_CPUS:12",
+    "MK_STAGE_KERF_INIT_OK cpus=2,3,4,5,6,7,8,9,10,11 memory=1024M",
+)
+
 
 
 class HarnessError(RuntimeError):
@@ -129,7 +147,7 @@ class HarnessConfig:
             root=root,
             build_dir=build_dir,
             qemu=environ.get("QEMU", "qemu-system-x86_64"),
-            cpus=_numeric_setting(environ, "QEMU_CPUS", 6),
+            cpus=_numeric_setting(environ, "QEMU_CPUS", 12),
             memory_mb=_numeric_setting(environ, "QEMU_MEMORY_MB", 8192),
             timeout_seconds=_numeric_setting(environ, "QEMU_TIMEOUT", 600),
         )
@@ -190,6 +208,34 @@ class HarnessConfig:
         ]
 
 
+def _event_field_int(event: dict[str, object], name: str) -> int | None:
+    fields = event.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    try:
+        return int(fields[name])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _validate_topology_growth_evidence(
+    log_text: str, events: Sequence[dict[str, object]]
+) -> None:
+    for marker in REQUIRED_TOPOLOGY_MARKERS:
+        if marker not in log_text:
+            raise HarnessError(f"missing-topology-evidence marker={marker!r}")
+
+    max_cpus_values = [
+        max_cpus
+        for event in events
+        if event.get("event") == "MK_CONCURRENT_CPU_PCI_RPC_PASS"
+        for max_cpus in [_event_field_int(event, "max_cpus")]
+        if max_cpus is not None
+    ]
+    if not max_cpus_values or max(max_cpus_values) < MIN_CPUSET_GROWTH_CPUS:
+        raise HarnessError("insufficient-cpuset-growth max_cpus<9")
+
+
 def validate_log(log_text: str) -> None:
     for marker in FAILURE_MARKERS:
         if marker in log_text:
@@ -198,12 +244,14 @@ def validate_log(log_text: str) -> None:
         if marker not in log_text:
             raise HarnessError(f"missing-marker marker={marker!r}")
     try:
-        event_names = {event["event"] for event in iter_events(log_text)}
+        events = list(iter_events(log_text))
     except (ValueError, json.JSONDecodeError) as error:
         raise HarnessError("malformed-event") from error
+    event_names = {event["event"] for event in events}
     for event_name in REQUIRED_EVENT_NAMES:
         if event_name not in event_names:
             raise HarnessError(f"missing-event event={event_name!r}")
+    _validate_topology_growth_evidence(log_text, events)
 
 
 class QmpClient:

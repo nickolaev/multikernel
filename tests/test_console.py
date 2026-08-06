@@ -1,11 +1,147 @@
 import os
 import unittest
 
-from harness.console import wait_for_alive
+from harness.console import ConsoleEventReader, wait_for_alive
 from harness.events import encode_event, format_marker
 
 
 class ConsoleMultiplexerTests(unittest.TestCase):
+    def test_event_reader_preserves_a_partial_structured_record(self):
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        observed = []
+        stream = ConsoleEventReader(reader, observed.append)
+        try:
+            fields = {"instance": 1, "reads": 1024}
+            payload = encode_event(
+                "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS",
+                fields,
+                "secondary",
+            ).encode()
+            midpoint = len(payload) // 2
+            os.write(write_fd, payload[:midpoint])
+            self.assertIsNone(
+                stream.drain_for_event(
+                    "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS"
+                )
+            )
+
+            os.write(write_fd, payload[midpoint:] + b"\n")
+            event = stream.wait_for_event(
+                "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS",
+                timeout=0.1,
+            )
+
+            self.assertIsNotNone(event)
+            self.assertEqual(event["fields"]["reads"], 1024)
+            self.assertEqual(len(observed), 1)
+        finally:
+            reader.close()
+            os.close(write_fd)
+
+    def test_event_reader_drains_to_the_newest_matching_record(self):
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        observed = []
+        stream = ConsoleEventReader(reader, observed.append)
+        try:
+            lines = []
+            for reads in (1024, 2048):
+                fields = {"instance": 1, "reads": reads}
+                lines.extend(
+                    [
+                        encode_event(
+                            "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS",
+                            fields,
+                            "secondary",
+                        ),
+                        format_marker(
+                            "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS",
+                            fields,
+                        ),
+                    ]
+                )
+            os.write(write_fd, ("\n".join(lines) + "\n").encode())
+
+            event = stream.wait_for_event(
+                "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS",
+                timeout=0.1,
+                predicate=lambda item: item["fields"]["reads"] > 512,
+                drain=True,
+            )
+
+            self.assertIsNotNone(event)
+            self.assertEqual(event["fields"]["reads"], 2048)
+            self.assertEqual(len(observed), 4)
+        finally:
+            reader.close()
+            os.close(write_fd)
+
+    def test_event_reader_quiet_drain_includes_an_inflight_record(self):
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        observed = []
+        event_name = "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS"
+        first = encode_event(
+            event_name,
+            {"instance": 1, "reads": 1024},
+            "secondary",
+        )
+        delayed = encode_event(
+            event_name,
+            {"instance": 1, "reads": 2048},
+            "secondary",
+        )
+
+        def observe_and_release_inflight(line):
+            observed.append(line)
+            if len(observed) == 1:
+                os.write(write_fd, f"{delayed}\n".encode())
+
+        stream = ConsoleEventReader(reader, observe_and_release_inflight)
+        try:
+            os.write(write_fd, f"{first}\n".encode())
+
+            event = stream.drain_for_event(
+                event_name,
+                idle_timeout=0.05,
+                timeout=0.2,
+            )
+
+            self.assertIsNotNone(event)
+            self.assertEqual(event["fields"]["reads"], 2048)
+            self.assertEqual(len(observed), 2)
+        finally:
+            reader.close()
+            os.close(write_fd)
+
+    def test_event_reader_reports_when_quiet_drain_times_out(self):
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        event_name = "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS"
+        payload = encode_event(
+            event_name,
+            {"instance": 1, "reads": 1024},
+            "secondary",
+        )
+
+        def keep_console_busy(_line):
+            os.write(write_fd, f"{payload}\n".encode())
+
+        stream = ConsoleEventReader(reader, keep_console_busy)
+        try:
+            os.write(write_fd, f"{payload}\n".encode())
+
+            with self.assertRaises(TimeoutError):
+                stream.drain_for_event(
+                    event_name,
+                    idle_timeout=0.05,
+                    timeout=0.01,
+                )
+        finally:
+            reader.close()
+            os.close(write_fd)
+
     def test_waits_for_json_and_text_from_every_console(self):
         readers = {}
         writers = []

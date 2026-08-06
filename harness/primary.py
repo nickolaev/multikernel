@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import IO, Sequence
 
 from harness.baseline import PciResource, render_baseline
-from harness.console import wait_for_alive
+from harness.console import ConsoleEventReader, wait_for_alive
 from harness.events import EVENT_PREFIX, encode_marker
 from harness.inventory import PciFunction
 from harness.topology import PCI_FAMILIES, PciFamily
@@ -111,6 +111,10 @@ def wait_until(predicate, attempts: int = 50) -> bool:
 class PrimaryScenario:
     def __init__(self) -> None:
         self.pool_base = ""
+        cpu_count = os.cpu_count() or 0
+        self.pool_cpus = tuple(range(2, cpu_count))
+        if len(self.pool_cpus) < 3:
+            raise ScenarioFailure("insufficient-pool-cpus")
         self.pf = PciFunction.from_path(PCI_DEVICES / "0000:00:02.0")
         self.vf: PciFunction | None = None
         self.pf_netdev = ""
@@ -325,7 +329,7 @@ class PrimaryScenario:
         Path("/run/baseline.dts").write_text(
             render_baseline(
                 self.pool_base,
-                cpus=(2, 3, 4),
+                cpus=self.pool_cpus,
                 memory_bytes=0x40000000,
                 resources=resources,
             )
@@ -346,6 +350,98 @@ class PrimaryScenario:
         emit("MK_STAGE_IOMMU_ENABLED driver=intel_iommu strict=1 intremap=on")
         emit(f"MK_STAGE_IOMMU_GROUP vf={vf.bdf} group={vf.iommu_group} members=1")
         emit("MK_COMPLEX_TOPOLOGY_READY pfs=3 vfs=8 assigned=0 noise=2")
+
+    @staticmethod
+    def _config_progress_reads(event: dict[str, object]) -> int:
+        fields = event.get("fields")
+        if not isinstance(fields, dict) or str(fields.get("instance")) != "1":
+            return -1
+        try:
+            return int(fields.get("reads", -1))
+        except (TypeError, ValueError):
+            return -1
+
+    def exercise_concurrent_cpu_config(self, console: IO[bytes]) -> None:
+        progress_event = "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS"
+        reader = ConsoleEventReader(
+            console,
+            on_line=lambda line: emit(f"MK_SECONDARY_STREAM:{line}"),
+        )
+        baseline = reader.wait_for_event(
+            progress_event,
+            timeout=60,
+            predicate=lambda event: self._config_progress_reads(event) >= 0,
+        )
+        if baseline is None:
+            raise ScenarioFailure("concurrent-cpu-config-baseline")
+        try:
+            queued_baseline = reader.drain_for_event(
+                progress_event,
+                predicate=lambda event: self._config_progress_reads(event) >= 0,
+                idle_timeout=0.25,
+                timeout=5,
+            )
+        except TimeoutError as error:
+            raise ScenarioFailure("concurrent-cpu-config-baseline-drain") from error
+        if queued_baseline is not None:
+            baseline = queued_baseline
+        baseline_reads = self._config_progress_reads(baseline)
+
+        expanded = ",".join(str(cpu) for cpu in self.pool_cpus)
+        for cycle in range(1, 4):
+            kerf(
+                "update",
+                "qemu-demo",
+                f"--cpus={expanded}",
+                stage=f"config-hotplug-expand-{cycle}",
+            )
+            self.expect_status("qemu-demo", 1, "active")
+            kerf(
+                "update",
+                "qemu-demo",
+                "--cpus=2",
+                stage=f"config-hotplug-contract-{cycle}",
+            )
+            self.expect_status("qemu-demo", 1, "active")
+
+        try:
+            backlog = reader.drain_for_event(
+                progress_event,
+                predicate=lambda event: self._config_progress_reads(event) >= 0,
+                idle_timeout=0.25,
+                timeout=5,
+            )
+        except TimeoutError as error:
+            raise ScenarioFailure("concurrent-cpu-config-backlog-drain") from error
+        backlog_reads = (
+            self._config_progress_reads(backlog)
+            if backlog is not None
+            else baseline_reads
+        )
+        watermark = max(baseline_reads, backlog_reads)
+        progress = reader.wait_for_event(
+            progress_event,
+            timeout=60,
+            predicate=lambda event: self._config_progress_reads(event) > watermark,
+        )
+        if progress is None:
+            raise ScenarioFailure("concurrent-cpu-config-progress")
+        progress_reads = self._config_progress_reads(progress)
+
+        messages = dmesg()
+        for marker in (
+            "IPI ring buffer full",
+            "PCI config request timed out",
+            "PCI IRQ request timed out",
+        ):
+            if marker in messages:
+                raise ScenarioFailure("concurrent-cpu-config-kernel-error")
+        emit(
+            "MK_CONCURRENT_CPU_PCI_RPC_PASS "
+            f"cycles=3 max_cpus={len(self.pool_cpus)} "
+            f"baseline_reads={baseline_reads} backlog_reads={watermark} "
+            f"progress_reads={progress_reads}"
+        )
 
     def wait_for_secondary(self, console: IO[bytes]) -> None:
         if wait_for_alive(
@@ -511,7 +607,10 @@ class PrimaryScenario:
             f"MK_STAGE_VF_HOST_OWNED vf={vf.bdf} driver={self.vf_host_driver} "
             "phase=baseline"
         )
-        emit("MK_STAGE_KERF_INIT_OK cpus=2,3,4 memory=1024M")
+        emit(
+            "MK_STAGE_KERF_INIT_OK "
+            f"cpus={','.join(str(cpu) for cpu in self.pool_cpus)} memory=1024M"
+        )
         self.expect_create_rejected(
             "pf-assignment", "hostile-pf", 101, 2, "64MB", "igbpf0", "igbvf"
         )
@@ -588,12 +687,15 @@ class PrimaryScenario:
         if vf.bdf.encode("ascii") not in device_tree:
             raise ScenarioFailure("vf-instance-dtb")
         emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource=igbvf0")
+        # TCG can delay an isolated vCPU long enough for the jiffies
+        # watchdog to reject QEMU's otherwise stable shared TSC.
         kerf(
             "load",
             "qemu-demo",
             "--kernel=/payload/vmlinux",
             "--initrd=/payload/secondary-initrd.cpio.gz",
-            f"--cmdline=rdinit=/init quiet loglevel=6 panic=-1 mk_vf_bdf={vf.bdf}",
+            f"--cmdline=rdinit=/init quiet loglevel=6 panic=-1 "
+            f"tsc=reliable mk_vf_bdf={vf.bdf}",
             "--console=mktty0",
             stage="kerf-load",
         )
@@ -614,10 +716,16 @@ class PrimaryScenario:
             )
             self.hostile_lease_attempts("active")
             emit("MK_COMPLEX_INSTANCE_ACTIVE family=igb0 id=1")
+            self.exercise_concurrent_cpu_config(console)
             self.run_complex_peers()
             kerf("kill", "qemu-demo", stage="kerf-kill")
             emit("MK_STAGE_KERF_KILL_OK id=1")
             self.expect_status("qemu-demo", 1, "loaded")
+            require_dmesg(
+                "Quiesced 3 host-owned PCI IRQ vectors for instance 1",
+                "halted-pci-irqs-not-quiesced",
+            )
+            emit("MK_HALTED_IRQ_QUIESCE_PASS instance=1 vectors=3")
             if vf.driver != ASSIGNMENT_DRIVER:
                 raise ScenarioFailure("vf-lease-released-on-kill")
             emit(

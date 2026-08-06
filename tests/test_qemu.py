@@ -25,7 +25,7 @@ class HarnessConfigTests(unittest.TestCase):
     def test_default_qemu_topology_matches_complex_sriov_scenario(self) -> None:
         config = HarnessConfig.from_environment(self.root, {})
 
-        self.assertEqual(config.cpus, 6)
+        self.assertEqual(config.cpus, 12)
         self.assertEqual(config.memory_mb, 8192)
         self.assertEqual(config.timeout_seconds, 600)
         self.assertEqual(config.build_dir, self.root / "build")
@@ -75,9 +75,18 @@ class LogValidationTests(unittest.TestCase):
     @staticmethod
     def complete_log() -> str:
         event_lines = [
-            encode_event(event, {}, "primary") for event in REQUIRED_EVENT_NAMES
+            encode_event(
+                event,
+                {"max_cpus": 9} if event == "MK_CONCURRENT_CPU_PCI_RPC_PASS" else {},
+                "primary",
+            )
+            for event in REQUIRED_EVENT_NAMES
         ]
-        return "\n".join([*REQUIRED_MARKERS, *event_lines])
+        topology_lines = [
+            "setup_percpu: NR_CPUS:12",
+            "MK_STAGE_KERF_INIT_OK cpus=2,3,4,5,6,7,8,9,10,11 memory=1024M",
+        ]
+        return "\n".join([*topology_lines, *REQUIRED_MARKERS, *event_lines])
 
     def test_accepts_complete_log(self) -> None:
         validate_log(self.complete_log())
@@ -111,6 +120,34 @@ class LogValidationTests(unittest.TestCase):
             ]
         )
         with self.assertRaisesRegex(HarnessError, "missing-event.*MK_DEMO_PASS"):
+            validate_log(present)
+
+    def test_requires_nr_cpus_12_boot_evidence(self) -> None:
+        present = self.complete_log().replace("setup_percpu: NR_CPUS:12", "")
+
+        with self.assertRaisesRegex(HarnessError, "missing-topology-evidence"):
+            validate_log(present)
+
+    def test_requires_full_multikernel_cpu_pool_evidence(self) -> None:
+        present = self.complete_log().replace(
+            "MK_STAGE_KERF_INIT_OK cpus=2,3,4,5,6,7,8,9,10,11 memory=1024M",
+            "MK_STAGE_KERF_INIT_OK cpus=2,3,4,5 memory=1024M",
+        )
+
+        with self.assertRaisesRegex(HarnessError, "missing-topology-evidence"):
+            validate_log(present)
+
+    def test_requires_concurrent_cpu_update_to_exceed_initial_cpuset_capacity(self) -> None:
+        present = self.complete_log().replace(
+            encode_event(
+                "MK_CONCURRENT_CPU_PCI_RPC_PASS", {"max_cpus": 9}, "primary"
+            ),
+            encode_event(
+                "MK_CONCURRENT_CPU_PCI_RPC_PASS", {"max_cpus": 8}, "primary"
+            ),
+        )
+
+        with self.assertRaisesRegex(HarnessError, "insufficient-cpuset-growth"):
             validate_log(present)
 
 
