@@ -528,19 +528,17 @@ class PrimaryScenario:
         )
 
         cases = (
-            (PCI_FAMILIES[1], "complex-igb1", 2, 3, 0x10000000),
-            (PCI_FAMILIES[2], "complex-igb2", 3, 4, 0x20000000),
+            (PCI_FAMILIES[1], "complex-igb1", 2, 3),
+            (PCI_FAMILIES[2], "complex-igb2", 3, 4),
         )
-        for family, name, instance_id, cpu, memory_offset in cases:
+        for family, name, instance_id, cpu in cases:
             vf = self.family_vfs[family.name][0]
-            memory_base = hex(int(self.pool_base, 16) + memory_offset)
             kerf(
                 "create",
                 name,
                 f"--id={instance_id}",
                 f"--cpus={cpu}",
                 "--memory=256MB",
-                f"--memory-base={memory_base}",
                 f"--devices={family.vf_resource_prefix}0",
                 stage=f"complex-create-{family.name}",
             )
@@ -675,7 +673,6 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 "--cpus=2",
                 "--memory=64MB",
-                f"--memory-base={self.pool_base}",
                 "--devices=igbvf0",
                 stage=f"respawn-create-{cycle}",
             )
@@ -767,7 +764,6 @@ class PrimaryScenario:
             "--id=1",
             "--cpus=2",
             "--memory=256MB",
-            f"--memory-base={self.pool_base}",
             "--devices=igbvf0",
             stage="kerf-create",
         )
@@ -909,7 +905,6 @@ class PrimaryScenario:
                 f"--id={cycle}",
                 "--cpus=2",
                 "--memory=256MB",
-                f"--memory-base={self.pool_base}",
                 "--devices=igbvf0",
                 stage=f"repeat-create-{cycle}",
             )
@@ -934,7 +929,6 @@ class PrimaryScenario:
             "--id=104",
             "--cpus=2",
             "--memory=256MB",
-            f"--memory-base={self.pool_base}",
             "--devices=igbvf0",
             stage="hostile-unbind-create",
         )
