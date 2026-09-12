@@ -44,13 +44,6 @@ def render_baseline(
 			size = <0x0 0x{memory_bytes:x}>;
 			numa-node-id = <0>;
 		}};
-		pci-host-bridges {{
-			host@0000,00 {{
-				segment = <0>;
-				bus-range = <0 255>;
-				ecam-base = /bits/ 64 <0xb0000000>;
-			}};
-		}};
 		devices {{{devices}
 		}};
 	}};

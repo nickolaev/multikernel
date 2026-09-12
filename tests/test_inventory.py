@@ -80,7 +80,7 @@ class PciInventoryTests(unittest.TestCase):
         self.assertIn('pci-id = "0000:00:12.0";', dts)
         self.assertIn("vendor-id = <0x8086>;", dts)
         self.assertIn("device-id = <0x10ca>;", dts)
-        self.assertIn("ecam-base = /bits/ 64 <0xb0000000>;", dts)
+        self.assertNotIn("pci-host-bridges", dts)
 
     def test_renders_a_multi_family_baseline(self) -> None:
         pf0 = self.make_function("0000:00:02.0", "8086", "10c9", "igb", "2")
