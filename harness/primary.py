@@ -301,6 +301,7 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"vf-discovery-{family.name}")
             typed_vfs = tuple(vf for vf in vfs if vf is not None)
             self.family_vfs[family.name] = typed_vfs
+            resources.append(PciResource(family.pf_resource, family.compatible_pf, pf))
             for index, vf in enumerate(typed_vfs):
                 if not wait_until(lambda vf=vf: bool(vf.driver)):
                     raise ScenarioFailure(f"vf-host-driver-{family.name}-{index}")
@@ -697,6 +698,26 @@ class PrimaryScenario:
             raise ScenarioFailure("pool-handoff")
         emit(f"MK_STAGE_POOL_OK size=1024M base={self.pool_base}")
         for family in PCI_FAMILIES:
+            pf = self.family_pfs[family.name]
+            write_text(
+                Path("/sys/bus/pci/drivers_probe"),
+                f"{pf.bdf}\n",
+                f"pf-host-rebind-{family.name}",
+            )
+            if not wait_until(lambda pf=pf, family=family: pf.driver == family.pf_driver):
+                raise ScenarioFailure(f"pf-host-rebind-{family.name}")
+            write_text(
+                pf.path / "sriov_numvfs",
+                f"{family.vf_count}\n",
+                f"vf-recreate-{family.name}",
+            )
+            if not wait_until(
+                lambda pf=pf, family=family: all(
+                    pf.virtual_function(index) is not None
+                    for index in range(family.vf_count)
+                )
+            ):
+                raise ScenarioFailure(f"vf-recreate-{family.name}")
             for index, vf in enumerate(self.family_vfs[family.name]):
                 write_text(
                     Path("/sys/bus/pci/drivers_probe"),
