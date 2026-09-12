@@ -56,6 +56,31 @@ class EventProtocolTests(unittest.TestCase):
             ["MK_STAGE_READY", "MK_STAGE_DONE"],
         )
 
+    def test_allows_human_markers_between_structured_events(self):
+        first = encode_event("MK_STAGE_READY", {"instance": 1}, "primary")
+        second = encode_event("MK_STAGE_DONE", {"instance": 1}, "primary")
+
+        events = list(
+            iter_events(
+                f"{first}\nMK_STAGE_READY instance=1\n"
+                f"MK_STAGE_IOMMU_DOMAIN id=1\n{second}\n"
+            )
+        )
+
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["MK_STAGE_READY", "MK_STAGE_DONE"],
+        )
+
+    def test_rejects_trailing_content_after_structured_event(self):
+        event = encode_event("MK_STAGE_READY", {"instance": 1}, "primary")
+
+        with self.assertRaisesRegex(ValueError, "trailing"):
+            list(iter_events(f"{event} trailing bytes\n"))
+
+        with self.assertRaisesRegex(ValueError, "trailing"):
+            list(iter_events(f"{event}\nmalformed marker\n"))
+
     def test_rejects_malformed_events(self):
         with self.assertRaisesRegex(ValueError, "prefix"):
             decode_event("MK_STAGE_READY id=1")

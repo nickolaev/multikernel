@@ -81,9 +81,25 @@ def iter_events(text: str):
         except json.JSONDecodeError as error:
             raise ValueError("malformed event record") from error
         trailing = candidate.lstrip()[end:]
-        if trailing.strip():
+        if _has_invalid_trailing_data(trailing):
             raise ValueError("trailing data in event record")
         yield _validate_event(payload)
         if next_offset < 0:
             return
         cursor = next_offset
+
+
+def _has_invalid_trailing_data(trailing: str) -> bool:
+    """Return whether text after a record is not a human marker line.
+
+    Serial output can put legacy ``MK_*`` marker lines between structured
+    records.  They are separate lines and therefore do not corrupt the JSON
+    record.  Bytes on the record's own line, or arbitrary text on a later
+    line, remain errors so malformed progress cannot be accepted.
+    """
+    lines = trailing.splitlines()
+    if not lines:
+        return False
+    if lines[0].strip():
+        return True
+    return any(line.strip() and not line.lstrip().startswith("MK_") for line in lines[1:])
