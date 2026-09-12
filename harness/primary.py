@@ -301,7 +301,6 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"vf-discovery-{family.name}")
             typed_vfs = tuple(vf for vf in vfs if vf is not None)
             self.family_vfs[family.name] = typed_vfs
-            resources.append(PciResource(family.pf_resource, family.compatible_pf, pf))
             for index, vf in enumerate(typed_vfs):
                 if not wait_until(lambda vf=vf: bool(vf.driver)):
                     raise ScenarioFailure(f"vf-host-driver-{family.name}-{index}")
@@ -697,6 +696,16 @@ class PrimaryScenario:
         if "Multikernel Memory Pool" not in read_text(Path("/proc/iomem")):
             raise ScenarioFailure("pool-handoff")
         emit(f"MK_STAGE_POOL_OK size=1024M base={self.pool_base}")
+        for family in PCI_FAMILIES:
+            for index, vf in enumerate(self.family_vfs[family.name]):
+                write_text(
+                    Path("/sys/bus/pci/drivers_probe"),
+                    f"{vf.bdf}\n",
+                    f"vf-host-rebind-{family.name}-{index}",
+                )
+                if not wait_until(lambda vf=vf, family=family: vf.driver == family.vf_driver):
+                    raise ScenarioFailure(f"vf-host-rebind-{family.name}-{index}")
+        emit("MK_COMPLEX_VF_HOST_REBOUND families=3 vfs=8")
         self.assert_vf_owner(self.vf_host_driver, "baseline")
         emit(f"MK_STAGE_PF_RETAINED pf={self.pf.bdf} driver=igb")
         emit(
