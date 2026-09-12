@@ -83,9 +83,12 @@ class LogValidationTests(unittest.TestCase):
             encode_event(
                 event,
                 ({"max_cpus": 9} if event == "MK_CONCURRENT_CPU_PCI_RPC_PASS" else
-                 ({name: 0 for name in FORBIDDEN_RELIABILITY_COUNTERS} |
-                  {"tx_before": 0, "tx_after": 1, "rx_before": 0, "rx_after": 1}
-                  if event == "MK_SECONDARY_VF_DATAPATH" else {})),
+                 ({"active_instances": 3, "leases": 3}
+                  if event == "MK_COMPLEX_CONCURRENT_LEASES_PASS" else
+                  ({"cycles": 100} if event == "MK_RESPAWN_STRESS_PASS" else
+                   ({name: 0 for name in FORBIDDEN_RELIABILITY_COUNTERS} |
+                    {"tx_before": 0, "tx_after": 1, "rx_before": 0, "rx_after": 1}
+                    if event == "MK_SECONDARY_VF_DATAPATH" else {})))),
                 "primary",
             )
             for event in REQUIRED_EVENT_NAMES
@@ -194,6 +197,20 @@ class LogValidationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(HarnessError, "forbidden-counter-value"):
             validate_log(complete.replace(old, event))
+
+    def test_rejects_one_child_lease_claim(self) -> None:
+        complete = self.complete_log().replace(
+            '"active_instances":3', '"active_instances":1'
+        )
+        with self.assertRaisesRegex(HarnessError, "missing-multi-child-proof"):
+            validate_log(complete)
+
+    def test_rejects_short_respawn_claim(self) -> None:
+        complete = self.complete_log().replace(
+            '"cycles":100', '"cycles":99'
+        )
+        with self.assertRaisesRegex(HarnessError, "missing-respawn-proof"):
+            validate_log(complete)
 
 
 class ProgressWatchdogTests(unittest.TestCase):

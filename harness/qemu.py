@@ -90,7 +90,8 @@ REQUIRED_MARKERS = (
     "MK_COMPLEX_HOSTILE_CONTAINED family=igb0",
     "MK_COMPLEX_HOSTILE_CONTAINED family=igb1",
     "MK_COMPLEX_HOSTILE_CONTAINED family=igb2",
-    "MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=1 families=igb0,igb1,igb2",
+    "MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=3 families=igb0,igb1,igb2",
+    "MK_RESPAWN_STRESS_PASS cycles=100",
     "MK_COMPLEX_UNASSIGNED_VFS_INTACT count=5 families=3 owner=host",
     "MK_COMPLEX_RESTORED families=3 vfs=8 ownership=host",
     "MK_STAGE_VF_TEARDOWN pf=0000:00:02.0 vfs=0",
@@ -109,6 +110,7 @@ REQUIRED_EVENT_NAMES = (
     "MK_HALTED_IRQ_QUIESCE_PASS",
     "MK_RESTART_VF_DATAPATH_PASS",
     "MK_COMPLEX_CONCURRENT_LEASES_PASS",
+    "MK_RESPAWN_STRESS_PASS",
     "MK_COMPLEX_RESTORED",
     "MK_DEMO_PASS",
 )
@@ -327,6 +329,40 @@ def _validate_counter_evidence(events: Sequence[dict[str, object]]) -> None:
         raise HarnessError("duplicate-or-missing-datapath-event")
 
 
+def _validate_multi_child_evidence(events: Sequence[dict[str, object]]) -> None:
+    """Require proof of three active children and 100 respawn cycles."""
+    lease_events = [
+        event for event in events
+        if event.get("event") == "MK_COMPLEX_CONCURRENT_LEASES_PASS"
+    ]
+    if len(lease_events) != 1:
+        raise HarnessError("missing-multi-child-proof lease-event")
+    fields = lease_events[0].get("fields")
+    if not isinstance(fields, dict):
+        raise HarnessError("missing-multi-child-proof lease-fields")
+    try:
+        active_instances = int(fields["active_instances"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise HarnessError("missing-multi-child-proof active-instances") from error
+    if active_instances < 3:
+        raise HarnessError(f"missing-multi-child-proof active_instances={active_instances}")
+
+    respawn_events = [
+        event for event in events if event.get("event") == "MK_RESPAWN_STRESS_PASS"
+    ]
+    if len(respawn_events) != 1:
+        raise HarnessError("missing-respawn-proof")
+    fields = respawn_events[0].get("fields")
+    if not isinstance(fields, dict):
+        raise HarnessError("missing-respawn-proof cycles")
+    try:
+        cycles = int(fields["cycles"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise HarnessError("missing-respawn-proof cycles") from error
+    if cycles < 100:
+        raise HarnessError(f"missing-respawn-proof cycles={cycles}")
+
+
 def validate_log(log_text: str) -> None:
     for marker in FAILURE_MARKERS:
         if marker in log_text:
@@ -347,6 +383,7 @@ def validate_log(log_text: str) -> None:
             raise HarnessError(f"duplicate-event event={event_name!r}")
     _validate_topology_growth_evidence(log_text, events)
     _validate_counter_evidence(events)
+    _validate_multi_child_evidence(events)
 
 
 class QmpClient:
