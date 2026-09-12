@@ -101,6 +101,14 @@ def require_dmesg(text: str, stage: str) -> None:
         raise ScenarioFailure(stage)
 
 
+def pool_device_name(function: PciFunction) -> str:
+    """Return the kernel-generated root-pool alias for a PCI function."""
+    domain, rest = function.bdf.split(":", 1)
+    bus, slot_func = rest.split(":", 1)
+    slot, func = slot_func.split(".", 1)
+    return f"pci_{int(domain, 16):04x}_{int(bus, 16):02x}_{int(slot, 16):02x}_{int(func)}"
+
+
 def wait_until(predicate, attempts: int = 50) -> bool:
     for _ in range(attempts):
         if predicate():
@@ -515,7 +523,7 @@ class PrimaryScenario:
             "complex-igb2-pf",
             120,
             4,
-            third.pf_resource,
+            pool_device_name(self.family_pfs[third.name]),
         )
         third_pf = self.family_pfs[third.name]
         if third_pf.driver != third.pf_driver:
@@ -541,7 +549,7 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 f"--cpus={cpu}",
                 "--memory=256MB",
-                f"--devices={family.vf_resource_prefix}0",
+                f"--devices={pool_device_name(vf)}",
                 stage=f"complex-create-{family.name}",
             )
             self.expect_status(name, instance_id, "ready")
@@ -675,7 +683,7 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 "--cpus=2",
                 "--memory=64MB",
-                "--devices=igbvf0",
+                f"--devices={pool_device_name(vf)}",
                 stage=f"respawn-create-{cycle}",
             )
             self.expect_status(name, instance_id, "ready")
@@ -749,7 +757,13 @@ class PrimaryScenario:
             f"cpus={','.join(str(cpu) for cpu in self.pool_cpus)} memory=1024M"
         )
         self.expect_create_rejected(
-            "pf-assignment", "hostile-pf", 101, 2, "64MB", "igbpf0", "igbvf"
+            "pf-assignment",
+            "hostile-pf",
+            101,
+            2,
+            "64MB",
+            pool_device_name(self.pf),
+            "igbvf",
         )
         self.expect_create_rejected(
             "duplicate-vf",
@@ -757,7 +771,7 @@ class PrimaryScenario:
             102,
             2,
             "64MB",
-            "igbvf0,igbvf0",
+            f"{pool_device_name(vf)},{pool_device_name(vf)}",
             "igbvf",
         )
         kerf(
@@ -766,7 +780,7 @@ class PrimaryScenario:
             "--id=1",
             "--cpus=2",
             "--memory=256MB",
-            "--devices=igbvf0",
+            f"--devices={pool_device_name(vf)}",
             stage="kerf-create",
         )
         emit("MK_STAGE_KERF_CREATE_OK id=1")
@@ -797,7 +811,7 @@ class PrimaryScenario:
             103,
             3,
             "128MB",
-            "igbvf0",
+            pool_device_name(vf),
             ASSIGNMENT_DRIVER,
         )
         emit(
@@ -818,7 +832,7 @@ class PrimaryScenario:
         )
         if vf.bdf.encode("ascii") not in device_tree:
             raise ScenarioFailure("vf-instance-dtb")
-        emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource=igbvf0")
+        emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource={pool_device_name(vf)}")
         # TCG can delay an isolated vCPU long enough for the jiffies
         # watchdog to reject QEMU's otherwise stable shared TSC.
         kerf(
@@ -907,7 +921,7 @@ class PrimaryScenario:
                 f"--id={cycle}",
                 "--cpus=2",
                 "--memory=256MB",
-                "--devices=igbvf0",
+                f"--devices={pool_device_name(vf)}",
                 stage=f"repeat-create-{cycle}",
             )
             self.expect_status(name, cycle, "ready")
@@ -931,7 +945,7 @@ class PrimaryScenario:
             "--id=104",
             "--cpus=2",
             "--memory=256MB",
-            "--devices=igbvf0",
+            f"--devices={pool_device_name(vf)}",
             stage="hostile-unbind-create",
         )
         self.expect_status("hostile-unbind", 104, "ready")
