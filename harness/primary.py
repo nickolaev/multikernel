@@ -675,7 +675,7 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 "--cpus=2",
                 "--memory=64MB",
-                f"--devices={pool_device_name(vf)}",
+                "--devices=igbvf0",
                 stage=f"respawn-create-{cycle}",
             )
             self.expect_status(name, instance_id, "ready")
@@ -772,7 +772,7 @@ class PrimaryScenario:
             "--id=1",
             "--cpus=2",
             "--memory=256MB",
-            f"--devices={pool_device_name(vf)}",
+            "--devices=igbvf0",
             stage="kerf-create",
         )
         emit("MK_STAGE_KERF_CREATE_OK id=1")
@@ -913,7 +913,7 @@ class PrimaryScenario:
                 f"--id={cycle}",
                 "--cpus=2",
                 "--memory=256MB",
-                f"--devices={pool_device_name(vf)}",
+                "--devices=igbvf0",
                 stage=f"repeat-create-{cycle}",
             )
             self.expect_status(name, cycle, "ready")
@@ -937,7 +937,7 @@ class PrimaryScenario:
             "--id=104",
             "--cpus=2",
             "--memory=256MB",
-            f"--devices={pool_device_name(vf)}",
+            "--devices=igbvf0",
             stage="hostile-unbind-create",
         )
         self.expect_status("hostile-unbind", 104, "ready")
