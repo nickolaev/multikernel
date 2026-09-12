@@ -1,63 +1,67 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-kerf_dir=${1:?usage: prepare-kerf-runtime.sh KERF_DIR BUILD_DIR PYTHON}
+kerf_dir=${1:?usage: prepare-kerf-runtime.sh KERF_DIR BUILD_DIR GUEST_SYSROOT TARGET_CC PYTHON}
 build_dir=${2:?missing build directory}
-python=${3:?missing Python interpreter}
+guest_sysroot=${3:?missing guest sysroot}
+target_cc=${4:?missing target compiler}
+python=${5:?missing host Python interpreter}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 runtime="${build_dir}/kerf-runtime"
 packages="${build_dir}/kerf-packages"
+site_dir="${runtime}/usr/lib/python3/dist-packages"
+rdtsc_sha256=993a8fe80ad00e3cca976feaa0a4fe98978e95e013ab5d668aeed7890bde4e8b
 
 case "${runtime}" in
 	*/build/kerf-runtime) ;;
 	*) printf 'refusing unsafe runtime path: %s\n' "${runtime}" >&2; exit 1 ;;
 esac
-
-py_version=$("${python}" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')
-stdlib=$("${python}" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')
-click_dir=$("${python}" -c 'import click, pathlib; print(pathlib.Path(click.__file__).parent)')
-site_dir="${runtime}/usr/lib/python3/dist-packages"
+[[ -f "${guest_sysroot}/.ready" ]] || {
+	printf 'guest sysroot is not ready: %s\n' "${guest_sysroot}" >&2
+	exit 1
+}
 
 rm -rf -- "${runtime}" "${packages}"
-mkdir -p "${runtime}/usr/bin" "${runtime}/usr/lib" "${site_dir}" "${packages}"
-install -m 0755 "${python}" "${runtime}/usr/bin/python3"
-cp -a "${stdlib}" "${runtime}/usr/lib/"
-rm -rf -- "${runtime}/usr/lib/${py_version}/ensurepip" \
-	"${runtime}/usr/lib/${py_version}/idlelib" \
-	"${runtime}/usr/lib/${py_version}/test" \
-	"${runtime}/usr/lib/${py_version}/tkinter" \
-	"${runtime}/usr/lib/${py_version}/turtledemo" \
-	"${runtime}/usr/lib/${py_version}/venv" \
-	"${runtime}/usr/lib/${py_version}"/config-*
+mkdir -p "${runtime}" "${packages}" "${site_dir}"
+cp -a "${guest_sysroot}/." "${runtime}/"
+ln -sfn usr/lib "${runtime}/lib"
+ln -sfn usr/lib64 "${runtime}/lib64"
+rm -rf -- "${runtime}/var/lib/apt/lists" "${runtime}/var/cache/apt" \
+	"${runtime}/usr/share/doc" "${runtime}/usr/share/man"
 
-cp -a "${click_dir}" "${site_dir}/click"
 cp -a "${kerf_dir}/src/kerf" "${site_dir}/kerf"
-"${python}" -m pip install --disable-pip-version-check --no-deps \
-	--target "${site_dir}" 'rdtsc==0.2.1'
-install -m 0644 "${root}/scripts/rdtsc-init.py" "${site_dir}/rdtsc/__init__.py"
-
 (
 	cd "${packages}"
-	apt-get download python3-libfdt
+	"${python}" -m pip download --disable-pip-version-check --no-deps \
+		--no-binary=:all: 'rdtsc==0.2.1'
 )
-libfdt_package=$(find "${packages}" -maxdepth 1 -type f -name 'python3-libfdt_*.deb' -print -quit)
-[[ -n "${libfdt_package}" ]] || { printf 'python3-libfdt download produced no package\n' >&2; exit 1; }
-dpkg-deb -x "${libfdt_package}" "${runtime}"
+rdtsc_archive="${packages}/rdtsc-0.2.1.tar.gz"
+echo "${rdtsc_sha256}  ${rdtsc_archive}" | sha256sum -c -
+tar -xzf "${rdtsc_archive}" -C "${packages}"
+mkdir -p "${site_dir}/rdtsc"
+"${target_cc}" -shared -fPIC -O2 \
+	-o "${site_dir}/rdtsc/rdtsc.so.1" "${packages}/rdtsc-0.2.1/src/rdtsc.c"
+install -m 0644 "${root}/scripts/rdtsc-init.py" "${site_dir}/rdtsc/__init__.py"
 
-declare -A libraries=()
-while IFS= read -r candidate; do
-	while IFS= read -r library; do
-		[[ -n "${library}" ]] && libraries["${library}"]=1
-	done < <(ldd "${candidate}" 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^\//) { print $i; break } }')
-done < <(find "${runtime}" -type f \( -perm /111 -o -name '*.so*' \) -print)
+python_binary=$(readlink -f "${runtime}/usr/bin/python3")
+[[ "${python_binary}" == "${runtime}"/* ]] || {
+	printf 'guest Python resolves outside runtime: %s\n' "${python_binary}" >&2
+	exit 1
+}
 
-for library in "${!libraries[@]}"; do
-	install -D -m 0755 "${library}" "${runtime}${library}"
-done
+while IFS= read -r -d '' candidate; do
+	description=$(file "${candidate}")
+	if grep -q 'ELF ' <<<"${description}" && ! grep -q 'x86-64' <<<"${description}"; then
+		printf 'non-x86 guest ELF: %s: %s\n' "${candidate}" "${description}" >&2
+		exit 1
+	fi
+done < <(find "${runtime}" -type f -print0)
 
-PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="${runtime}/usr" PYTHONPATH="${site_dir}" \
-	"${runtime}/usr/bin/python3" -c 'import click, kerf.cli, libfdt, rdtsc'
-find "${runtime}" -type d -name __pycache__ -prune -exec rm -rf -- {} +
+[[ -f "${site_dir}/click/__init__.py" ]] || { printf 'Click is missing from guest runtime\n' >&2; exit 1; }
+find "${site_dir}" -name '_libfdt*.so' -print -quit | grep -q . || {
+	printf 'libfdt Python extension is missing from guest runtime\n' >&2
+	exit 1
+}
 touch "${runtime}/.ready"
-printf 'MK_KERF_RUNTIME_OK python=%s bytes=%s\n' \
-	"${py_version}" "$(du -sb "${runtime}" | awk '{print $1}')"
+printf 'MK_KERF_RUNTIME_OK guest_arch=x86_64 bytes=%s\n' \
+	"$(du -sb "${runtime}" | awk '{print $1}')"

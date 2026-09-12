@@ -4,6 +4,7 @@ set -euo pipefail
 destination=${1:?usage: prepare-host-deps.sh DESTINATION}
 cache="${destination}/cache"
 root="${destination}/root"
+lib_dir="${root}/usr/lib"
 
 mkdir -p "${cache}" "${root}"
 if [[ ! -f "${root}/usr/include/gelf.h" ]]; then
@@ -28,8 +29,9 @@ system_libelf=$(ldconfig -p | awk '
 	printf 'host dependency bootstrap: system libelf.so.1 was not found\n' >&2
 	exit 1
 }
-ln -sfn "${system_libelf}" "${root}/usr/lib/x86_64-linux-gnu/libelf.so"
-[[ -e "${root}/usr/lib/x86_64-linux-gnu/libelf.so" ]] || {
+mkdir -p "${lib_dir}"
+ln -sfn "${system_libelf}" "${lib_dir}/libelf.so"
+[[ -e "${lib_dir}/libelf.so" ]] || {
 	printf 'host dependency bootstrap: libelf.so was not extracted\n' >&2
 	exit 1
 }
