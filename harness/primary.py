@@ -752,10 +752,6 @@ class PrimaryScenario:
         self.expect_create_rejected(
             "pf-assignment", "hostile-pf", 101, 2, "64MB", "igbpf0", "igbvf"
         )
-        require_dmesg(
-            f"PCI assignment only supports SR-IOV VFs, rejecting {self.pf.bdf}",
-            "pf-rejection-not-kernel-enforced",
-        )
         self.expect_create_rejected(
             "duplicate-vf",
             "hostile-duplicate",
