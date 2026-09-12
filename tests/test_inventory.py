@@ -57,7 +57,13 @@ class PciInventoryTests(unittest.TestCase):
         )
         (pf.path / "virtfn0").symlink_to(vf.path)
 
-        self.assertEqual(pf.virtual_function(0), vf)
+        resolved_vf = pf.virtual_function(0)
+        self.assertIsNotNone(resolved_vf)
+        assert resolved_vf is not None
+        self.assertEqual(resolved_vf.bdf, vf.bdf)
+        self.assertEqual(resolved_vf.vendor, vf.vendor)
+        self.assertEqual(resolved_vf.device, vf.device)
+        self.assertEqual(resolved_vf.path.resolve(), vf.path.resolve())
         self.assertIsNone(pf.virtual_function(1))
 
     def test_renders_owned_baseline_from_inventory(self) -> None:
