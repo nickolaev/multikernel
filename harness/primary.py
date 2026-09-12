@@ -506,7 +506,7 @@ class PrimaryScenario:
         if (INSTANCES / name).exists():
             raise ScenarioFailure(f"{stage}-instance-leaked")
 
-    def run_complex_peers(self) -> None:
+    def run_complex_peers(self, primary_console: IO[bytes]) -> None:
         third = PCI_FAMILIES[2]
         self.expect_complex_rejected(
             "complex-igb2-pf",
@@ -562,11 +562,7 @@ class PrimaryScenario:
         # write selects the endpoint before the guest is started, just as
         # `kerf console --id=...` does for an already active instance.
         with ExitStack() as consoles:
-            primary_console = consoles.enter_context(
-                open("/dev/mktty", "r+b", buffering=0)
-            )
-            peer_consoles: dict[int, IO[bytes]] = {1: primary_console}
-            peer_consoles[1].write(b"1\n")
+            peer_consoles: dict[int, IO[bytes]] = {}
             for family, name, instance_id, _cpu, _memory_offset in cases:
                 vf = self.family_vfs[family.name][0]
                 kerf(
@@ -592,6 +588,9 @@ class PrimaryScenario:
                 ),
             ):
                 raise ScenarioFailure("complex-secondary-marker")
+            # The primary console was already drained by wait_for_secondary;
+            # reusing that fd would race the stream and reopening it would
+            # select a second endpoint after the primary's alive event.
             self.expect_status("qemu-demo", 1, "active")
             self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-concurrent-leases")
             emit(
@@ -643,7 +642,11 @@ class PrimaryScenario:
                 f"id={instance_id} vf={vf.bdf} owner={vf.driver}"
             )
 
-        for family, name, _instance_id, _cpu, _memory_offset in cases:
+        for family, name, instance_id, _cpu, _memory_offset in cases:
+            kerf("kill", name, stage=f"complex-kill-{family.name}")
+            self.expect_status(name, instance_id, "loaded")
+            kerf("unload", name, stage=f"complex-unload-{family.name}")
+            self.expect_status(name, instance_id, "ready")
             kerf("delete", name, stage=f"complex-delete-{family.name}")
             if (INSTANCES / name).exists():
                 raise ScenarioFailure(f"complex-delete-{family.name}")
@@ -652,6 +655,10 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"complex-restore-{family.name}")
             if self.family_pfs[family.name].driver != family.pf_driver:
                 raise ScenarioFailure(f"complex-pf-restore-{family.name}")
+            emit(
+                f"MK_COMPLEX_PEER_TEARDOWN_PASS family={family.name} "
+                f"id={instance_id} state=ready-before-delete"
+            )
         self.expect_status("qemu-demo", 1, "active")
         self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-peers-restored")
         emit("MK_COMPLEX_PEERS_RESTORED peers=2 primary_state=active")
@@ -806,7 +813,7 @@ class PrimaryScenario:
             self.hostile_lease_attempts("active")
             emit("MK_COMPLEX_INSTANCE_ACTIVE family=igb0 id=1")
             self.exercise_concurrent_cpu_config(console)
-            self.run_complex_peers()
+            self.run_complex_peers(console)
             kerf("kill", "qemu-demo", stage="kerf-kill")
             emit("MK_STAGE_KERF_KILL_OK id=1")
             self.expect_status("qemu-demo", 1, "loaded")
