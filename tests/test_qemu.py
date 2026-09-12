@@ -9,6 +9,7 @@ from pathlib import Path
 from harness.events import encode_event
 from harness.qemu import (
     FAILURE_MARKERS,
+    FORBIDDEN_RELIABILITY_COUNTERS,
     REQUIRED_EVENT_NAMES,
     REQUIRED_MARKERS,
     HarnessConfig,
@@ -81,7 +82,10 @@ class LogValidationTests(unittest.TestCase):
         event_lines = [
             encode_event(
                 event,
-                {"max_cpus": 9} if event == "MK_CONCURRENT_CPU_PCI_RPC_PASS" else {},
+                ({"max_cpus": 9} if event == "MK_CONCURRENT_CPU_PCI_RPC_PASS" else
+                 ({name: 0 for name in FORBIDDEN_RELIABILITY_COUNTERS} |
+                  {"tx_before": 0, "tx_after": 1, "rx_before": 0, "rx_after": 1}
+                  if event == "MK_SECONDARY_VF_DATAPATH" else {})),
                 "primary",
             )
             for event in REQUIRED_EVENT_NAMES
@@ -126,6 +130,29 @@ class LogValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(HarnessError, "missing-event.*MK_DEMO_PASS"):
             validate_log(present)
 
+    def test_rejects_duplicate_structured_event(self) -> None:
+        event = encode_event("MK_DEMO_PASS", {}, "primary")
+        with self.assertRaisesRegex(HarnessError, "duplicate-event.*MK_DEMO_PASS"):
+            validate_log(self.complete_log() + "\n" + event)
+
+    def test_requires_datapath_reliability_counters(self) -> None:
+        event = encode_event(
+            "MK_SECONDARY_VF_DATAPATH",
+            {"tx_before": 0, "tx_after": 1, "rx_before": 0, "rx_after": 1},
+            "secondary",
+        )
+        with self.assertRaisesRegex(HarnessError, "malformed-reliability-counters"):
+            validate_log(
+                self.complete_log().replace(
+                    next(
+                        line
+                        for line in self.complete_log().splitlines()
+                        if '"event":"MK_SECONDARY_VF_DATAPATH"' in line
+                    ),
+                    event,
+                )
+            )
+
     def test_requires_nr_cpus_12_boot_evidence(self) -> None:
         present = self.complete_log().replace("setup_percpu: NR_CPUS:12", "")
 
@@ -160,8 +187,13 @@ class LogValidationTests(unittest.TestCase):
             {"tx_before": 4, "tx_after": 3, "rx_before": 1, "rx_after": 2},
             "secondary",
         )
+        complete = self.complete_log()
+        old = next(
+            line for line in complete.splitlines()
+            if '"event":"MK_SECONDARY_VF_DATAPATH"' in line
+        )
         with self.assertRaisesRegex(HarnessError, "forbidden-counter-value"):
-            validate_log(self.complete_log() + "\n" + event)
+            validate_log(complete.replace(old, event))
 
 
 class ProgressWatchdogTests(unittest.TestCase):
@@ -171,10 +203,17 @@ class ProgressWatchdogTests(unittest.TestCase):
         watchdog.feed("kernel chatter\n")
         now[0] = 119.0
         self.assertFalse(watchdog.stalled())
-        watchdog.feed('MK_EVENT {"event":"progress"}\n')
+        watchdog.feed(encode_event("progress", {}, "primary") + "\n")
         now[0] = 238.0
         self.assertFalse(watchdog.stalled())
         now[0] = 358.0
+        self.assertTrue(watchdog.stalled())
+
+    def test_invalid_structured_record_does_not_reset_watchdog(self) -> None:
+        now = [0.0]
+        watchdog = ProgressWatchdog(10, clock=lambda: now[0])
+        watchdog.feed('MK_EVENT {"event":"progress"} trailing\n')
+        now[0] = 11.0
         self.assertTrue(watchdog.stalled())
 
     def test_handles_split_structured_event(self) -> None:
@@ -183,7 +222,9 @@ class ProgressWatchdogTests(unittest.TestCase):
         watchdog.feed("MK_EV")
         now[0] = 11.0
         self.assertTrue(watchdog.stalled())
-        watchdog.feed('ENT {"event":"progress"}\n')
+        watchdog.feed(
+            'ENT {"event":"progress","fields":{},"source":"primary"}\n'
+        )
         self.assertFalse(watchdog.stalled())
 
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from harness.events import encode_event, format_marker, iter_events
+from harness.events import decode_event, encode_event, format_marker, iter_events
 from harness.topology import complex_pci_args
 
 
@@ -99,6 +99,7 @@ REQUIRED_MARKERS = (
 FAILURE_MARKERS = ("MK_DEMO_FAIL", "MK_SECONDARY_FAIL")
 REQUIRED_EVENT_NAMES = (
     "MK_STAGE_IOMMU_DOMAIN",
+    "MK_SECONDARY_VF_DATAPATH",
     "MK_SECONDARY_PCI_CONFIG_STRESS_READY",
     "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS",
     "MK_SECONDARY_VF_REBIND_PASS",
@@ -110,6 +111,21 @@ REQUIRED_EVENT_NAMES = (
     "MK_COMPLEX_CONCURRENT_LEASES_PASS",
     "MK_COMPLEX_RESTORED",
     "MK_DEMO_PASS",
+)
+FORBIDDEN_RELIABILITY_COUNTERS = (
+    "rx_errors",
+    "rx_dropped",
+    "rx_fifo_errors",
+    "rx_frame_errors",
+    "rx_length_errors",
+    "rx_missed_errors",
+    "tx_errors",
+    "tx_dropped",
+    "tx_fifo_errors",
+    "tx_carrier_errors",
+    "tx_heartbeat_errors",
+    "tx_window_errors",
+    "collisions",
 )
 MIN_CPUSET_GROWTH_CPUS = 9
 DEFAULT_QEMU_TIMEOUT = 1200
@@ -136,11 +152,20 @@ class ProgressWatchdog:
         self.progress_events = 0
 
     def feed(self, chunk: bytes | str) -> None:
-        self._buffer += chunk.decode(errors="replace") if isinstance(chunk, bytes) else chunk
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode(errors="replace")
+        self._buffer += chunk
         lines = self._buffer.splitlines(keepends=True)
-        self._buffer = lines.pop() if lines and not lines[-1].endswith(("\n", "\r")) else ""
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._buffer = lines.pop()
+        else:
+            self._buffer = ""
         for line in lines:
-            if "MK_EVENT " in line:
+            try:
+                decode_event(line)
+            except (ValueError, json.JSONDecodeError):
+                continue
+            else:
                 self._last_progress = self._clock()
                 self.progress_events += 1
 
@@ -271,9 +296,11 @@ def _validate_topology_growth_evidence(
 
 
 def _validate_counter_evidence(events: Sequence[dict[str, object]]) -> None:
+    datapath_events = 0
     for event in events:
         if event.get("event") != "MK_SECONDARY_VF_DATAPATH":
             continue
+        datapath_events += 1
         fields = event.get("fields")
         if not isinstance(fields, dict):
             raise HarnessError("malformed-counter-evidence")
@@ -288,6 +315,16 @@ def _validate_counter_evidence(events: Sequence[dict[str, object]]) -> None:
             raise HarnessError("forbidden-counter-value")
         if values["tx_after"] < values["tx_before"] or values["rx_after"] < values["rx_before"]:
             raise HarnessError("forbidden-counter-value")
+        try:
+            reliability = {
+                name: int(fields[name]) for name in FORBIDDEN_RELIABILITY_COUNTERS
+            }
+        except (KeyError, TypeError, ValueError) as error:
+            raise HarnessError("malformed-reliability-counters") from error
+        if any(value != 0 for value in reliability.values()):
+            raise HarnessError("forbidden-reliability-counter")
+    if datapath_events != 1:
+        raise HarnessError("duplicate-or-missing-datapath-event")
 
 
 def validate_log(log_text: str) -> None:
@@ -301,10 +338,13 @@ def validate_log(log_text: str) -> None:
         events = list(iter_events(log_text))
     except (ValueError, json.JSONDecodeError) as error:
         raise HarnessError("malformed-event") from error
-    event_names = {event["event"] for event in events}
+    event_names = [event["event"] for event in events]
     for event_name in REQUIRED_EVENT_NAMES:
-        if event_name not in event_names:
+        count = event_names.count(event_name)
+        if count == 0:
             raise HarnessError(f"missing-event event={event_name!r}")
+        if count > 1:
+            raise HarnessError(f"duplicate-event event={event_name!r}")
     _validate_topology_growth_evidence(log_text, events)
     _validate_counter_evidence(events)
 

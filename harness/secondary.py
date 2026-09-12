@@ -26,6 +26,21 @@ DEFAULTS = {
 PCI_CONFIG_PROGRESS_INTERVAL = 1024
 BUSYBOX_TIMEOUT_SECONDS = 15
 LINK_UP_TIMEOUT_SECONDS = 30
+RELIABILITY_COUNTERS = (
+    "rx_errors",
+    "rx_dropped",
+    "rx_fifo_errors",
+    "rx_frame_errors",
+    "rx_length_errors",
+    "rx_missed_errors",
+    "tx_errors",
+    "tx_dropped",
+    "tx_fifo_errors",
+    "tx_carrier_errors",
+    "tx_heartbeat_errors",
+    "tx_window_errors",
+    "collisions",
+)
 
 
 def parse_cmdline(text: str) -> dict[str, str]:
@@ -387,6 +402,14 @@ class SecondaryScenario:
                     break
                 time.sleep(0.05)
             if rx_after > rx_before:
+                reliability = {}
+                for name in RELIABILITY_COUNTERS:
+                    try:
+                        reliability[name] = int(
+                            self.read(net_path / "statistics" / name)
+                        )
+                    except (OSError, ValueError):
+                        reliability[name] = 0
                 self.sink.emit(
                     "MK_SECONDARY_VF_DATAPATH",
                     instance=config.instance,
@@ -397,6 +420,7 @@ class SecondaryScenario:
                     rx_before=rx_before,
                     rx_after=rx_after,
                     tx_accounted=tx_after > tx_before,
+                    **reliability,
                 )
                 datapath_ok = True
             else:

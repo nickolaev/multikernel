@@ -59,7 +59,12 @@ def decode_event(line: str) -> dict[str, object]:
 
 
 def iter_events(text: str):
-    """Yield events while tolerating timestamped kernel-console insertion."""
+    """Yield valid events while tolerating timestamped console insertion.
+
+    Each structured record is a single JSON object.  Do not silently accept a
+    valid prefix followed by arbitrary bytes: doing so would turn truncated or
+    concatenated records into false progress evidence.
+    """
     decoder = json.JSONDecoder()
     cursor = 0
     while True:
@@ -71,7 +76,13 @@ def iter_events(text: str):
         payload_end = len(text) if next_offset < 0 else next_offset
         candidate = text[payload_start:payload_end]
         candidate = _KERNEL_CONSOLE_RECORD.sub("", candidate)
-        payload, _end = decoder.raw_decode(candidate)
+        try:
+            payload, end = decoder.raw_decode(candidate.lstrip())
+        except json.JSONDecodeError as error:
+            raise ValueError("malformed event record") from error
+        trailing = candidate.lstrip()[end:]
+        if trailing.strip():
+            raise ValueError("trailing data in event record")
         yield _validate_event(payload)
         if next_offset < 0:
             return

@@ -6,7 +6,9 @@ die() {
 	exit 1
 }
 
-[[ -d "${LINUX_DIR}/.git" ]] || die "${LINUX_DIR} is not a Linux Git tree"
+[[ -e "${LINUX_DIR}/.git" ]] || die "${LINUX_DIR} is not a Linux Git tree"
+git -C "${LINUX_DIR}" rev-parse --git-dir >/dev/null 2>&1 ||
+	die "${LINUX_DIR} is not a Linux Git tree"
 [[ -f "${LINUX_DIR}/kernel/multikernel/Kconfig" ]] || die "Multikernel sources are missing"
 [[ -f "${KERF_DIR}/src/kerf/cli.py" ]] || die "${KERF_DIR} is not a Kerf source tree"
 [[ -f "${LAZY_CMA_DIR}/lazy_cma.c" ]] || die "${LAZY_CMA_DIR} is not a lazy_cma source tree"
