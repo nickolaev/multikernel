@@ -94,11 +94,9 @@ make test QEMU_TIMEOUT=240 QEMU_IDLE_TIMEOUT=120
 The defaults are QEMU TCG, twelve CPUs, 8192 MiB of RAM, a 1200-second total
 timeout, and a 120-second structured-progress idle timeout. The harness
 requires exactly 12 CPUs and 8192 MiB to exercise the approved topology.
-Console chatter does not reset the idle watchdog;
-only structured `MK_EVENT` progress does. The primary allocates a
-1024 MiB Multikernel pool. Instance 1 receives CPU 2 and 256 MiB; the two
-additional lease instances reserve CPUs 3 and 4 and 256 MiB each while they are
-in the ready state.
+Console chatter does not reset the idle watchdog; only structured `MK_EVENT`
+progress does. The primary allocates a 1024 MiB Multikernel pool. Three lease
+instances receive CPUs 2, 3, and 4 and 256 MiB each while they are active.
 
 ## Make targets
 
@@ -139,7 +137,8 @@ MK_SECONDARY_PRIMARY_REACHABLE ...
 MK_SECONDARY_ALIVE ...
 MK_RESTART_VF_DATAPATH_PASS instance=1 ...
 MK_PRIMARY_STILL_ALIVE ...
-MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=1 ...
+MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=3 ...
+MK_RESPAWN_STRESS_PASS cycles=100
 MK_COMPLEX_UNASSIGNED_VFS_INTACT count=5 families=3 owner=host
 MK_COMPLEX_RESTORED families=3 vfs=8 ownership=host
 MK_DEMO_PASS simultaneous_kernels=verified
