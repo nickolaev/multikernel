@@ -27,7 +27,7 @@ def _render_resource(resource: PciResource) -> str:
 
 
 def render_baseline(
-    memory_base: str,
+    _memory_base: str,
     cpus: Sequence[int],
     memory_bytes: int,
     resources: Sequence[PciResource],
@@ -40,8 +40,10 @@ def render_baseline(
 	compatible = "multikernel-v1";
 	resources {{
 		cpus = /bits/ 64 <{cpu_cells}>;
-		memory-base = <{memory_base}>;
-		memory-bytes = <0x{memory_bytes:x}>;
+		memory@0 {{
+			size = <0x0 0x{memory_bytes:x}>;
+			numa-node-id = <0>;
+		}};
 		pci-host-bridges {{
 			host@0000,00 {{
 				segment = <0>;

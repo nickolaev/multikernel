@@ -74,7 +74,8 @@ class PciInventoryTests(unittest.TestCase):
 
         dts = render_single_vf_baseline("0x1d9000000", pf, vf)
 
-        self.assertIn("memory-base = <0x1d9000000>;", dts)
+        self.assertIn("memory@0 {", dts)
+        self.assertIn("size = <0x0 0x20000000>;", dts)
         self.assertIn('pci-id = "0000:00:02.0";', dts)
         self.assertIn('pci-id = "0000:00:12.0";', dts)
         self.assertIn("vendor-id = <0x8086>;", dts)
@@ -98,7 +99,7 @@ class PciInventoryTests(unittest.TestCase):
         )
 
         self.assertIn("cpus = /bits/ 64 <2 3 4>;", dts)
-        self.assertIn("memory-bytes = <0x40000000>;", dts)
+        self.assertIn("size = <0x0 0x40000000>;", dts)
         self.assertIn("igbvf0", dts)
         self.assertIn("igbpf2", dts)
 
