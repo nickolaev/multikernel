@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import ExitStack
 from pathlib import Path
 from typing import IO, Sequence
 
@@ -457,6 +458,30 @@ class PrimaryScenario:
             emit(line)
         raise ScenarioFailure("secondary-marker")
 
+    @staticmethod
+    def _secondary_cmdline(
+        family: PciFamily, instance_id: int, vf: PciFunction
+    ) -> str:
+        return (
+            "rdinit=/init quiet loglevel=6 panic=-1 tsc=reliable "
+            f"mk_instance_id={instance_id} mk_pf_bdf={family.pf_bdf} "
+            f"mk_vf_bdf={vf.bdf} mk_vf_vendor=0x{vf.vendor:04x} "
+            f"mk_vf_device=0x{vf.device:04x} mk_vf_driver={family.vf_driver} "
+            f"mk_vf_address={family.subnet}.15/24 "
+            f"mk_vf_peer={family.subnet}.2 mk_primary_peer={family.subnet}.14"
+        )
+
+    @staticmethod
+    def _open_console(instance_id: int) -> IO[bytes]:
+        """Attach one mktty fd to an instance, as kerf console does."""
+        console = open("/dev/mktty", "r+b", buffering=0)
+        try:
+            console.write(f"{instance_id}\n".encode("ascii"))
+        except OSError:
+            console.close()
+            raise
+        return console
+
     def expect_complex_rejected(
         self,
         stage: str,
@@ -533,12 +558,50 @@ class PrimaryScenario:
                 f"cpu={cpu} vf={vf.bdf} group={vf.iommu_group}"
             )
 
-        self.expect_status("qemu-demo", 1, "active")
-        self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-concurrent-leases")
-        emit(
-            "MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=1 "
-            "families=igb0,igb1,igb2"
-        )
+        # Every loaded peer gets its own mktty attachment.  The initial ID
+        # write selects the endpoint before the guest is started, just as
+        # `kerf console --id=...` does for an already active instance.
+        with ExitStack() as consoles:
+            primary_console = consoles.enter_context(
+                open("/dev/mktty", "r+b", buffering=0)
+            )
+            peer_consoles: dict[int, IO[bytes]] = {1: primary_console}
+            peer_consoles[1].write(b"1\n")
+            for family, name, instance_id, _cpu, _memory_offset in cases:
+                vf = self.family_vfs[family.name][0]
+                kerf(
+                    "load",
+                    name,
+                    "--kernel=/payload/vmlinux",
+                    "--initrd=/payload/secondary-initrd.cpio.gz",
+                    f"--cmdline={self._secondary_cmdline(family, instance_id, vf)}",
+                    "--console=mktty0",
+                    stage=f"complex-load-{family.name}",
+                )
+                self.expect_status(name, instance_id, "loaded")
+                console = consoles.enter_context(self._open_console(instance_id))
+                peer_consoles[instance_id] = console
+                kerf("exec", name, stage=f"complex-exec-{family.name}")
+                self.expect_status(name, instance_id, "active")
+
+            if not wait_for_alive(
+                peer_consoles,
+                timeout=180,
+                on_line=lambda instance, line: emit(
+                    f"MK_SECONDARY_STREAM instance={instance}:{line}"
+                ),
+            ):
+                raise ScenarioFailure("complex-secondary-marker")
+            self.expect_status("qemu-demo", 1, "active")
+            self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-concurrent-leases")
+            emit(
+                "MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=3 "
+                "families=igb0,igb1,igb2"
+            )
+
+            for family, name, instance_id, _cpu, _memory_offset in cases:
+                self.expect_status(name, instance_id, "active")
+                emit(f"MK_COMPLEX_INSTANCE_ACTIVE family={family.name} id={instance_id}")
 
         unassigned = 0
         for family in PCI_FAMILIES:
@@ -592,6 +655,32 @@ class PrimaryScenario:
         self.expect_status("qemu-demo", 1, "active")
         self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-peers-restored")
         emit("MK_COMPLEX_PEERS_RESTORED peers=2 primary_state=active")
+
+    def run_respawn_stress(self) -> None:
+        """Create and fully tear down 100 real VF-backed instance lifecycles."""
+        vf = self.assigned_vf
+        for cycle in range(100):
+            name = f"qemu-respawn-{cycle}"
+            instance_id = 200 + cycle
+            kerf(
+                "create",
+                name,
+                f"--id={instance_id}",
+                "--cpus=2",
+                "--memory=64MB",
+                f"--memory-base={self.pool_base}",
+                "--devices=igbvf0",
+                stage=f"respawn-create-{cycle}",
+            )
+            self.expect_status(name, instance_id, "ready")
+            self.assert_vf_owner(ASSIGNMENT_DRIVER, f"respawn-assigned-{cycle}")
+            kerf("delete", name, stage=f"respawn-delete-{cycle}")
+            if (INSTANCES / name).exists():
+                raise ScenarioFailure(f"respawn-instance-{cycle}")
+            if not wait_until(lambda: vf.driver == self.vf_host_driver):
+                raise ScenarioFailure(f"respawn-restore-{cycle}")
+            self.assert_pf_owned(f"respawn-restored-{cycle}")
+        emit("MK_RESPAWN_STRESS_PASS cycles=100")
 
     def run(self) -> None:
         self.allocate_pool()
@@ -793,6 +882,7 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"repeat-restore-{cycle}")
             self.assert_pf_owned(f"repeat-restore-{cycle}")
             emit(f"MK_REPEAT_CYCLE_PASS cycle={cycle} vf={vf.bdf} restoration=verified")
+        self.run_respawn_stress()
         kerf(
             "create",
             "hostile-unbind",
@@ -844,7 +934,7 @@ class PrimaryScenario:
             "MK_DEMO_PASS simultaneous_kernels=verified iommu=verified "
             "vf_lease=verified hostile_attempts=verified repeat_cycles=3 "
             "fail_closed=verified complex_topology=verified "
-            "concurrent_leases=3 active_instances=1"
+            "concurrent_leases=3 active_instances=3 respawn_cycles=100"
         )
 
 
