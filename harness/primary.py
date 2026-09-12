@@ -706,6 +706,18 @@ class PrimaryScenario:
             )
             if not wait_until(lambda pf=pf, family=family: pf.driver == family.pf_driver):
                 raise ScenarioFailure(f"pf-host-rebind-{family.name}")
+            netdevs = sorted((pf.path / "net").iterdir())
+            if not netdevs:
+                raise ScenarioFailure(f"pf-netdev-rebind-{family.name}")
+            netdev = netdevs[0].name
+            self.family_netdevs[family.name] = netdev
+            if family.name == "igb0":
+                self.pf_netdev = netdev
+            command([BUSYBOX, "ip", "link", "set", netdev, "up"], f"pf-link-rebind-{family.name}")
+            command(
+                [BUSYBOX, "ip", "addr", "add", family.primary_address, "dev", netdev],
+                f"pf-address-rebind-{family.name}",
+            )
             write_text(
                 pf.path / "sriov_numvfs",
                 f"{family.vf_count}\n",
