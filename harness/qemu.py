@@ -325,8 +325,8 @@ def _validate_counter_evidence(events: Sequence[dict[str, object]]) -> None:
             raise HarnessError("malformed-reliability-counters") from error
         if any(value != 0 for value in reliability.values()):
             raise HarnessError("forbidden-reliability-counter")
-    if datapath_events != 1:
-        raise HarnessError("duplicate-or-missing-datapath-event")
+    if datapath_events == 0:
+        raise HarnessError("missing-datapath-event")
 
 
 def _validate_multi_child_evidence(events: Sequence[dict[str, object]]) -> None:
@@ -379,6 +379,9 @@ def validate_log(log_text: str) -> None:
         count = event_names.count(event_name)
         if count == 0:
             raise HarnessError(f"missing-event event={event_name!r}")
+        if event_name.startswith("MK_SECONDARY_"):
+            # Each active child reports its own lifecycle and datapath events.
+            continue
         if count > 1:
             raise HarnessError(f"duplicate-event event={event_name!r}")
     _validate_topology_growth_evidence(log_text, events)

@@ -102,4 +102,19 @@ def _has_invalid_trailing_data(trailing: str) -> bool:
         return False
     if lines[0].strip():
         return True
-    return any(line.strip() and not line.lstrip().startswith("MK_") for line in lines[1:])
+    return any(
+        line.strip() and not _is_allowed_human_line(line)
+        for line in lines[1:]
+    )
+
+
+def _is_allowed_human_line(line: str) -> bool:
+    """Accept known Kerf status output between structured serial events."""
+    stripped = line.lstrip()
+    return (
+        stripped.startswith("MK_")
+        or stripped.startswith("✓ ")
+        or stripped.startswith("Booting instance '")
+        or stripped.startswith("Shutting down instance '")
+        or stripped.startswith("Unloading kernel for instance '")
+    )

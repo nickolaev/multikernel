@@ -370,6 +370,14 @@ class SecondaryScenario:
         link = self.read(net_path / "operstate")
         tx_before = int(self.read(net_path / "statistics/tx_packets"))
         rx_before = int(self.read(net_path / "statistics/rx_packets"))
+        reliability_before = {}
+        for name in RELIABILITY_COUNTERS:
+            try:
+                reliability_before[name] = int(
+                    self.read(net_path / "statistics" / name)
+                )
+            except (OSError, ValueError):
+                reliability_before[name] = 0
         self.sink.emit(
             "MK_SECONDARY_VF_TRAFFIC_BEFORE",
             instance=config.instance,
@@ -405,9 +413,8 @@ class SecondaryScenario:
                 reliability = {}
                 for name in RELIABILITY_COUNTERS:
                     try:
-                        reliability[name] = int(
-                            self.read(net_path / "statistics" / name)
-                        )
+                        after = int(self.read(net_path / "statistics" / name))
+                        reliability[name] = after - reliability_before[name]
                     except (OSError, ValueError):
                         reliability[name] = 0
                 self.sink.emit(

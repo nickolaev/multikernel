@@ -72,6 +72,22 @@ class EventProtocolTests(unittest.TestCase):
             ["MK_STAGE_READY", "MK_STAGE_DONE"],
         )
 
+    def test_allows_kerf_status_lines_between_structured_events(self):
+        first = encode_event("MK_STAGE_READY", {"instance": 1}, "primary")
+        second = encode_event("MK_STAGE_DONE", {"instance": 1}, "primary")
+
+        events = list(
+            iter_events(
+                f"{first}\n✓ Created instance 'demo' (transaction 1)\n"
+                f"Booting instance 'demo' (ID: 1)...\n{second}\n"
+            )
+        )
+
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["MK_STAGE_READY", "MK_STAGE_DONE"],
+        )
+
     def test_rejects_trailing_content_after_structured_event(self):
         event = encode_event("MK_STAGE_READY", {"instance": 1}, "primary")
 

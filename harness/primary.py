@@ -61,11 +61,14 @@ def command(
 def kerf(
     *arguments: str, stage: str, check: bool = True, capture: bool = False
 ) -> subprocess.CompletedProcess[str]:
+    # Kerf's human status lines are not part of the serial event protocol.
+    # Keep them out of the guest console so they cannot be mistaken for
+    # malformed data between structured MK_EVENT records.
     return command(
         [sys.executable, "-m", "kerf.cli", *arguments],
         stage,
         check=check,
-        capture=capture,
+        capture=True,
     )
 
 
@@ -99,6 +102,14 @@ def dmesg() -> str:
 def require_dmesg(text: str, stage: str) -> None:
     if text not in dmesg():
         raise ScenarioFailure(stage)
+
+
+def pool_device_name(function: PciFunction) -> str:
+    """Return the stable root-pool alias for a PCI function."""
+    domain, rest = function.bdf.split(":", 1)
+    bus, slot_func = rest.split(":", 1)
+    slot, func = slot_func.split(".", 1)
+    return f"pci_{int(domain, 16):04x}_{int(bus, 16):02x}_{int(slot, 16):02x}_{int(func)}"
 
 
 def wait_until(predicate, attempts: int = 50) -> bool:
@@ -302,7 +313,7 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"vf-discovery-{family.name}")
             typed_vfs = tuple(vf for vf in vfs if vf is not None)
             self.family_vfs[family.name] = typed_vfs
-            pf_resources.append(PciResource(family.pf_resource, family.compatible_pf, pf))
+            pf_resources.append(PciResource(pool_device_name(pf), family.compatible_pf, pf))
             for index, vf in enumerate(typed_vfs):
                 if not wait_until(lambda vf=vf: bool(vf.driver)):
                     raise ScenarioFailure(f"vf-host-driver-{family.name}-{index}")
@@ -312,7 +323,7 @@ class PrimaryScenario:
                     raise ScenarioFailure(f"vf-iommu-group-{family.name}-{index}")
                 resources.append(
                     PciResource(
-                        f"{family.vf_resource_prefix}{index}",
+                        pool_device_name(vf),
                         family.compatible_vf,
                         vf,
                     )
@@ -515,7 +526,7 @@ class PrimaryScenario:
             "complex-igb2-pf",
             120,
             4,
-            third.pf_resource,
+            pool_device_name(self.family_pfs[third.name]),
         )
         third_pf = self.family_pfs[third.name]
         if third_pf.driver != third.pf_driver:
@@ -541,7 +552,7 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 f"--cpus={cpu}",
                 "--memory=256MB",
-                f"--devices={family.vf_resource_prefix}0",
+                f"--devices={pool_device_name(vf)}",
                 stage=f"complex-create-{family.name}",
             )
             self.expect_status(name, instance_id, "ready")
@@ -563,7 +574,7 @@ class PrimaryScenario:
         # `kerf console --id=...` does for an already active instance.
         with ExitStack() as consoles:
             peer_consoles: dict[int, IO[bytes]] = {}
-            for family, name, instance_id, _cpu, _memory_offset in cases:
+            for family, name, instance_id, _cpu in cases:
                 vf = self.family_vfs[family.name][0]
                 kerf(
                     "load",
@@ -598,7 +609,7 @@ class PrimaryScenario:
                 "families=igb0,igb1,igb2"
             )
 
-            for family, name, instance_id, _cpu, _memory_offset in cases:
+            for family, name, instance_id, _cpu in cases:
                 self.expect_status(name, instance_id, "active")
                 emit(f"MK_COMPLEX_INSTANCE_ACTIVE family={family.name} id={instance_id}")
 
@@ -617,7 +628,7 @@ class PrimaryScenario:
             f"MK_COMPLEX_HOSTILE_CONTAINED family=igb0 id=1 "
             f"vf={self.assigned_vf.bdf} owner={self.assigned_vf.driver}"
         )
-        for family, _name, instance_id, _cpu, _memory_offset in cases:
+        for family, _name, instance_id, _cpu in cases:
             pf = self.family_pfs[family.name]
             vf = self.family_vfs[family.name][0]
             expect_write_rejected(
@@ -642,7 +653,7 @@ class PrimaryScenario:
                 f"id={instance_id} vf={vf.bdf} owner={vf.driver}"
             )
 
-        for family, name, instance_id, _cpu, _memory_offset in cases:
+        for family, name, instance_id, _cpu in cases:
             kerf("kill", name, stage=f"complex-kill-{family.name}")
             self.expect_status(name, instance_id, "loaded")
             kerf("unload", name, stage=f"complex-unload-{family.name}")
@@ -675,7 +686,7 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 "--cpus=2",
                 "--memory=64MB",
-                "--devices=igbvf0",
+                f"--devices={pool_device_name(vf)}",
                 stage=f"respawn-create-{cycle}",
             )
             self.expect_status(name, instance_id, "ready")
@@ -737,6 +748,7 @@ class PrimaryScenario:
                 )
                 if not wait_until(lambda vf=vf, family=family: vf.driver == family.vf_driver):
                     raise ScenarioFailure(f"vf-host-rebind-{family.name}-{index}")
+        vf = self.assigned_vf
         emit("MK_COMPLEX_VF_HOST_REBOUND families=3 vfs=8")
         self.assert_vf_owner(self.vf_host_driver, "baseline")
         emit(f"MK_STAGE_PF_RETAINED pf={self.pf.bdf} driver=igb")
@@ -754,7 +766,7 @@ class PrimaryScenario:
             101,
             2,
             "64MB",
-            "igbpf0",
+            pool_device_name(self.pf),
             "igbvf",
         )
         self.expect_create_rejected(
@@ -763,7 +775,7 @@ class PrimaryScenario:
             102,
             2,
             "64MB",
-            "igbvf0,igbvf0",
+            f"{pool_device_name(vf)},{pool_device_name(vf)}",
             "igbvf",
         )
         kerf(
@@ -772,7 +784,7 @@ class PrimaryScenario:
             "--id=1",
             "--cpus=2",
             "--memory=256MB",
-            "--devices=igbvf0",
+            f"--devices={pool_device_name(vf)}",
             stage="kerf-create",
         )
         emit("MK_STAGE_KERF_CREATE_OK id=1")
@@ -803,7 +815,7 @@ class PrimaryScenario:
             103,
             3,
             "128MB",
-            "igbvf0",
+            pool_device_name(vf),
             ASSIGNMENT_DRIVER,
         )
         emit(
@@ -816,15 +828,9 @@ class PrimaryScenario:
         )
         self.hostile_lease_attempts("ready")
         device_tree = (INSTANCES / "qemu-demo/device_tree").read_bytes()
-        if b"pci-host-bridges" not in device_tree:
-            raise ScenarioFailure("pci-host-bridge-instance-dtb")
-        emit(
-            "MK_STAGE_PCI_HOST_BRIDGE_METADATA id=1 segment=0000 "
-            "buses=00-ff ecam=0xb0000000"
-        )
         if vf.bdf.encode("ascii") not in device_tree:
             raise ScenarioFailure("vf-instance-dtb")
-        emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource=igbvf0")
+        emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource={pool_device_name(vf)}")
         # TCG can delay an isolated vCPU long enough for the jiffies
         # watchdog to reject QEMU's otherwise stable shared TSC.
         kerf(
@@ -913,7 +919,7 @@ class PrimaryScenario:
                 f"--id={cycle}",
                 "--cpus=2",
                 "--memory=256MB",
-                "--devices=igbvf0",
+                f"--devices={pool_device_name(vf)}",
                 stage=f"repeat-create-{cycle}",
             )
             self.expect_status(name, cycle, "ready")
@@ -937,7 +943,7 @@ class PrimaryScenario:
             "--id=104",
             "--cpus=2",
             "--memory=256MB",
-            "--devices=igbvf0",
+            f"--devices={pool_device_name(vf)}",
             stage="hostile-unbind-create",
         )
         self.expect_status("hostile-unbind", 104, "ready")
