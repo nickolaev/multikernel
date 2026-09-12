@@ -274,6 +274,7 @@ class PrimaryScenario:
 
     def prepare_inventory(self) -> None:
         resources: list[PciResource] = []
+        pf_resources: list[PciResource] = []
         for family in PCI_FAMILIES:
             pf = PciFunction.from_path(PCI_DEVICES / family.pf_bdf)
             if pf.driver != family.pf_driver:
@@ -301,7 +302,7 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"vf-discovery-{family.name}")
             typed_vfs = tuple(vf for vf in vfs if vf is not None)
             self.family_vfs[family.name] = typed_vfs
-            resources.append(PciResource(family.pf_resource, family.compatible_pf, pf))
+            pf_resources.append(PciResource(family.pf_resource, family.compatible_pf, pf))
             for index, vf in enumerate(typed_vfs):
                 if not wait_until(lambda vf=vf: bool(vf.driver)):
                     raise ScenarioFailure(f"vf-host-driver-{family.name}-{index}")
@@ -324,6 +325,7 @@ class PrimaryScenario:
                 f"MK_COMPLEX_PF_READY family={family.name} pf={pf.bdf} "
                 f"driver={pf.driver} vfs={family.vf_count}"
             )
+        resources.extend(pf_resources)
         self.pf = self.family_pfs["igb0"]
         self.vf = self.family_vfs["igb0"][0]
         self.vf_host_driver = self.assigned_vf.driver
