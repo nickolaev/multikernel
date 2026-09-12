@@ -14,6 +14,7 @@ from harness.qemu import (
     HarnessConfig,
     HarnessError,
     QmpClient,
+    ProgressWatchdog,
     validate_log,
 )
 
@@ -27,7 +28,8 @@ class HarnessConfigTests(unittest.TestCase):
 
         self.assertEqual(config.cpus, 12)
         self.assertEqual(config.memory_mb, 8192)
-        self.assertEqual(config.timeout_seconds, 600)
+        self.assertEqual(config.timeout_seconds, 1200)
+        self.assertEqual(config.idle_timeout_seconds, 120)
         self.assertEqual(config.build_dir, self.root / "build")
         self.assertIn("q35,accel=tcg", config.qemu_args())
         self.assertIn("intel-iommu,intremap=on", config.qemu_args())
@@ -46,26 +48,28 @@ class HarnessConfigTests(unittest.TestCase):
             {
                 "BUILD_DIR": "/tmp/mk-build",
                 "QEMU": "/usr/bin/qemu-system-x86_64",
-                "QEMU_CPUS": "8",
+                "QEMU_CPUS": "12",
                 "QEMU_MEMORY_MB": "8192",
                 "QEMU_TIMEOUT": "600",
+                "QEMU_IDLE_TIMEOUT": "30",
             },
         )
 
         self.assertEqual(config.build_dir, Path("/tmp/mk-build"))
         self.assertEqual(config.qemu, "/usr/bin/qemu-system-x86_64")
-        self.assertEqual(config.cpus, 8)
+        self.assertEqual(config.cpus, 12)
         self.assertEqual(config.memory_mb, 8192)
         self.assertEqual(config.timeout_seconds, 600)
+        self.assertEqual(config.idle_timeout_seconds, 30)
 
     def test_rejects_non_numeric_tunable(self) -> None:
         with self.assertRaisesRegex(HarnessError, "must be numeric"):
             HarnessConfig.from_environment(self.root, {"QEMU_CPUS": "four"})
 
     def test_rejects_insufficient_resources(self) -> None:
-        with self.assertRaisesRegex(HarnessError, "at least 5"):
+        with self.assertRaisesRegex(HarnessError, "exactly 12"):
             HarnessConfig.from_environment(self.root, {"QEMU_CPUS": "4"})
-        with self.assertRaisesRegex(HarnessError, "at least 7168"):
+        with self.assertRaisesRegex(HarnessError, "exactly 8192"):
             HarnessConfig.from_environment(
                 self.root, {"QEMU_MEMORY_MB": "6144"}
             )
@@ -149,6 +153,38 @@ class LogValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(HarnessError, "insufficient-cpuset-growth"):
             validate_log(present)
+
+    def test_rejects_forbidden_counter_values(self) -> None:
+        event = encode_event(
+            "MK_SECONDARY_VF_DATAPATH",
+            {"tx_before": 4, "tx_after": 3, "rx_before": 1, "rx_after": 2},
+            "secondary",
+        )
+        with self.assertRaisesRegex(HarnessError, "forbidden-counter-value"):
+            validate_log(self.complete_log() + "\n" + event)
+
+
+class ProgressWatchdogTests(unittest.TestCase):
+    def test_structured_event_resets_watchdog_but_console_chatter_does_not(self) -> None:
+        now = [0.0]
+        watchdog = ProgressWatchdog(120, clock=lambda: now[0])
+        watchdog.feed("kernel chatter\n")
+        now[0] = 119.0
+        self.assertFalse(watchdog.stalled())
+        watchdog.feed('MK_EVENT {"event":"progress"}\n')
+        now[0] = 238.0
+        self.assertFalse(watchdog.stalled())
+        now[0] = 358.0
+        self.assertTrue(watchdog.stalled())
+
+    def test_handles_split_structured_event(self) -> None:
+        now = [0.0]
+        watchdog = ProgressWatchdog(10, clock=lambda: now[0])
+        watchdog.feed("MK_EV")
+        now[0] = 11.0
+        self.assertTrue(watchdog.stalled())
+        watchdog.feed('ENT {"event":"progress"}\n')
+        self.assertFalse(watchdog.stalled())
 
 
 class QmpClientTests(unittest.IsolatedAsyncioTestCase):

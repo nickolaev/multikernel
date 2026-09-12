@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -111,6 +112,8 @@ REQUIRED_EVENT_NAMES = (
     "MK_DEMO_PASS",
 )
 MIN_CPUSET_GROWTH_CPUS = 9
+DEFAULT_QEMU_TIMEOUT = 1200
+DEFAULT_QEMU_IDLE_TIMEOUT = 120
 REQUIRED_TOPOLOGY_MARKERS = (
     "setup_percpu: NR_CPUS:12",
     "MK_STAGE_KERF_INIT_OK cpus=2,3,4,5,6,7,8,9,10,11 memory=1024M",
@@ -120,6 +123,29 @@ REQUIRED_TOPOLOGY_MARKERS = (
 
 class HarnessError(RuntimeError):
     """A deterministic harness configuration or verification failure."""
+
+
+class ProgressWatchdog:
+    """Track structured harness progress while ignoring console chatter."""
+
+    def __init__(self, idle_seconds: float, clock=time.monotonic) -> None:
+        self.idle_seconds = idle_seconds
+        self._clock = clock
+        self._last_progress = clock()
+        self._buffer = ""
+        self.progress_events = 0
+
+    def feed(self, chunk: bytes | str) -> None:
+        self._buffer += chunk.decode(errors="replace") if isinstance(chunk, bytes) else chunk
+        lines = self._buffer.splitlines(keepends=True)
+        self._buffer = lines.pop() if lines and not lines[-1].endswith(("\n", "\r")) else ""
+        for line in lines:
+            if "MK_EVENT " in line:
+                self._last_progress = self._clock()
+                self.progress_events += 1
+
+    def stalled(self) -> bool:
+        return self._clock() - self._last_progress >= self.idle_seconds
 
 
 def _numeric_setting(environ: Mapping[str, str], name: str, default: int) -> int:
@@ -137,6 +163,7 @@ class HarnessConfig:
     cpus: int
     memory_mb: int
     timeout_seconds: int
+    idle_timeout_seconds: int
 
     @classmethod
     def from_environment(
@@ -149,7 +176,10 @@ class HarnessConfig:
             qemu=environ.get("QEMU", "qemu-system-x86_64"),
             cpus=_numeric_setting(environ, "QEMU_CPUS", 12),
             memory_mb=_numeric_setting(environ, "QEMU_MEMORY_MB", 8192),
-            timeout_seconds=_numeric_setting(environ, "QEMU_TIMEOUT", 600),
+            timeout_seconds=_numeric_setting(environ, "QEMU_TIMEOUT", DEFAULT_QEMU_TIMEOUT),
+            idle_timeout_seconds=_numeric_setting(
+                environ, "QEMU_IDLE_TIMEOUT", DEFAULT_QEMU_IDLE_TIMEOUT
+            ),
         )
         config.validate()
         return config
@@ -175,10 +205,14 @@ class HarnessConfig:
         return self.build_dir / "qemu-qmp.sock"
 
     def validate(self) -> None:
-        if self.cpus < 5:
-            raise HarnessError("QEMU_CPUS must be at least 5")
-        if self.memory_mb < 7168:
-            raise HarnessError("QEMU_MEMORY_MB must be at least 7168")
+        if self.cpus != 12:
+            raise HarnessError("QEMU_CPUS must be exactly 12")
+        if self.memory_mb != 8192:
+            raise HarnessError("QEMU_MEMORY_MB must be exactly 8192")
+        if self.timeout_seconds < 30:
+            raise HarnessError("QEMU_TIMEOUT must be at least 30 seconds")
+        if self.idle_timeout_seconds < 1:
+            raise HarnessError("QEMU_IDLE_TIMEOUT must be at least 1 second")
 
     def qemu_args(self) -> list[str]:
         return [
@@ -236,6 +270,26 @@ def _validate_topology_growth_evidence(
         raise HarnessError("insufficient-cpuset-growth max_cpus<9")
 
 
+def _validate_counter_evidence(events: Sequence[dict[str, object]]) -> None:
+    for event in events:
+        if event.get("event") != "MK_SECONDARY_VF_DATAPATH":
+            continue
+        fields = event.get("fields")
+        if not isinstance(fields, dict):
+            raise HarnessError("malformed-counter-evidence")
+        try:
+            values = {
+                name: int(fields[name])
+                for name in ("tx_before", "tx_after", "rx_before", "rx_after")
+            }
+        except (KeyError, TypeError, ValueError) as error:
+            raise HarnessError("malformed-counter-evidence") from error
+        if any(value < 0 for value in values.values()):
+            raise HarnessError("forbidden-counter-value")
+        if values["tx_after"] < values["tx_before"] or values["rx_after"] < values["rx_before"]:
+            raise HarnessError("forbidden-counter-value")
+
+
 def validate_log(log_text: str) -> None:
     for marker in FAILURE_MARKERS:
         if marker in log_text:
@@ -252,6 +306,7 @@ def validate_log(log_text: str) -> None:
         if event_name not in event_names:
             raise HarnessError(f"missing-event event={event_name!r}")
     _validate_topology_growth_evidence(log_text, events)
+    _validate_counter_evidence(events)
 
 
 class QmpClient:
@@ -321,13 +376,34 @@ def _host_event(
     print(encode_event(event, fields, "host"), flush=True)
 
 
-async def _stream_serial(reader: asyncio.StreamReader, log: Path) -> None:
+async def _stream_serial(
+    reader: asyncio.StreamReader, log: Path, watchdog: ProgressWatchdog | None = None
+) -> None:
     with log.open("wb") as log_file:
         while chunk := await reader.read(64 * 1024):
+            if watchdog is not None:
+                watchdog.feed(chunk)
             log_file.write(chunk)
             log_file.flush()
             sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
+
+
+async def _wait_for_qemu(
+    process: asyncio.subprocess.Process,
+    watchdog: ProgressWatchdog,
+    timeout_seconds: int,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while process.returncode is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise HarnessError("timeout")
+        try:
+            await asyncio.wait_for(process.wait(), timeout=min(1.0, remaining))
+        except asyncio.TimeoutError:
+            if watchdog.stalled():
+                raise HarnessError("idle-timeout")
 
 
 async def _stop_qemu(
@@ -378,7 +454,8 @@ async def _run_test_async(config: HarnessConfig) -> int:
         stderr=asyncio.subprocess.STDOUT,
     )
     assert process.stdout is not None
-    serial_task = asyncio.create_task(_stream_serial(process.stdout, config.log))
+    watchdog = ProgressWatchdog(config.idle_timeout_seconds)
+    serial_task = asyncio.create_task(_stream_serial(process.stdout, config.log, watchdog))
     qmp: QmpClient | None = None
     try:
         qmp = await QmpClient.connect(config.qmp_socket)
@@ -386,10 +463,10 @@ async def _run_test_async(config: HarnessConfig) -> int:
         status_name = status.get("status", "unknown") if isinstance(status, dict) else "unknown"
         _host_event("MK_QMP_CONNECTED", {"status": status_name}, host_events)
         try:
-            await asyncio.wait_for(process.wait(), timeout=config.timeout_seconds)
-        except asyncio.TimeoutError as error:
+            await _wait_for_qemu(process, watchdog, config.timeout_seconds)
+        except HarnessError as error:
             await _stop_qemu(process, qmp)
-            raise HarnessError("timeout") from error
+            raise error
         await serial_task
     finally:
         if process.returncode is None:

@@ -88,12 +88,14 @@ Common overrides:
 
 ```sh
 make build JOBS=12
-make test QEMU_TIMEOUT=240
-make test QEMU_CPUS=6 QEMU_MEMORY_MB=8192
+make test QEMU_TIMEOUT=240 QEMU_IDLE_TIMEOUT=120
 ```
 
-The defaults are QEMU TCG, six CPUs, 8192 MiB of RAM, and a 600-second test
-timeout. At least five CPUs and 7168 MiB are required. The primary allocates a
+The defaults are QEMU TCG, twelve CPUs, 8192 MiB of RAM, a 1200-second total
+timeout, and a 120-second structured-progress idle timeout. The harness
+requires exactly 12 CPUs and 8192 MiB to exercise the approved topology.
+Console chatter does not reset the idle watchdog;
+only structured `MK_EVENT` progress does. The primary allocates a
 1024 MiB Multikernel pool. Instance 1 receives CPU 2 and 256 MiB; the two
 additional lease instances reserve CPUs 3 and 4 and 256 MiB each while they are
 in the ready state.
