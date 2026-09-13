@@ -187,6 +187,32 @@ class ConsoleMultiplexerTests(unittest.TestCase):
             reader.close()
             os.close(write_fd)
 
+    def test_failure_event_rejects_alive_sequence(self):
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        try:
+            records = (
+                encode_event(
+                    "MK_SECONDARY_FAIL",
+                    {"instance": 1, "reason": "vf-not-enumerated"},
+                    "secondary",
+                ),
+                encode_event(
+                    "MK_SECONDARY_ALIVE",
+                    {"instance": 1, "pid": 31},
+                    "secondary",
+                ),
+                format_marker("MK_SECONDARY_ALIVE", {"instance": 1, "pid": 31}),
+            )
+            os.write(write_fd, ("\n".join(records) + "\n").encode())
+
+            self.assertFalse(
+                wait_for_alive({1: reader}, timeout=0.1, on_line=lambda *_: None)
+            )
+        finally:
+            reader.close()
+            os.close(write_fd)
+
 
 if __name__ == "__main__":
     unittest.main()

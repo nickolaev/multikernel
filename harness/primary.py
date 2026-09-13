@@ -64,12 +64,22 @@ def kerf(
     # Kerf's human status lines are not part of the serial event protocol.
     # Keep them out of the guest console so they cannot be mistaken for
     # malformed data between structured MK_EVENT records.
-    return command(
+    result = command(
         [sys.executable, "-m", "kerf.cli", *arguments],
         stage,
-        check=check,
+        check=False,
         capture=True,
     )
+    if check and result.returncode:
+        for line in result.stdout.splitlines():
+            os.write(
+                sys.stdout.fileno(),
+                f"KERF_COMMAND_ERROR stage={stage}: {line}\n".encode(
+                    "ascii", errors="replace"
+                ),
+            )
+        raise ScenarioFailure(stage)
+    return result
 
 
 def read_text(path: Path) -> str:
@@ -104,8 +114,8 @@ def require_dmesg(text: str, stage: str) -> None:
         raise ScenarioFailure(stage)
 
 
-def pool_device_name(function: PciFunction) -> str:
-    """Return the stable root-pool alias for a PCI function."""
+def baseline_device_name(function: PciFunction) -> str:
+    """Return a DTS-safe node name for a baseline PCI function."""
     domain, rest = function.bdf.split(":", 1)
     bus, slot_func = rest.split(":", 1)
     slot, func = slot_func.split(".", 1)
@@ -173,6 +183,15 @@ class PrimaryScenario:
             f"expected={expected} actual={actual}"
         )
         raise ScenarioFailure(f"status-{name}-{expected}")
+
+    @staticmethod
+    def require_assigned_device(name: str, bdf: str) -> None:
+        from kerf.dtc.parser import DeviceTreeParser
+
+        device_tree = (INSTANCES / name / "device_tree").read_bytes()
+        assigned_devices = DeviceTreeParser().parse_devices_from_bytes(device_tree)
+        if bdf not in assigned_devices:
+            raise ScenarioFailure(f"{name}-instance-dtb")
 
     def expect_create_rejected(
         self,
@@ -313,7 +332,9 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"vf-discovery-{family.name}")
             typed_vfs = tuple(vf for vf in vfs if vf is not None)
             self.family_vfs[family.name] = typed_vfs
-            pf_resources.append(PciResource(pool_device_name(pf), family.compatible_pf, pf))
+            pf_resources.append(
+                PciResource(baseline_device_name(pf), family.compatible_pf, pf)
+            )
             for index, vf in enumerate(typed_vfs):
                 if not wait_until(lambda vf=vf: bool(vf.driver)):
                     raise ScenarioFailure(f"vf-host-driver-{family.name}-{index}")
@@ -323,7 +344,7 @@ class PrimaryScenario:
                     raise ScenarioFailure(f"vf-iommu-group-{family.name}-{index}")
                 resources.append(
                     PciResource(
-                        pool_device_name(vf),
+                        baseline_device_name(vf),
                         family.compatible_vf,
                         vf,
                     )
@@ -526,7 +547,7 @@ class PrimaryScenario:
             "complex-igb2-pf",
             120,
             4,
-            pool_device_name(self.family_pfs[third.name]),
+            self.family_pfs[third.name].bdf,
         )
         third_pf = self.family_pfs[third.name]
         if third_pf.driver != third.pf_driver:
@@ -552,7 +573,7 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 f"--cpus={cpu}",
                 "--memory=256MB",
-                f"--devices={pool_device_name(vf)}",
+                f"--devices={vf.bdf}",
                 stage=f"complex-create-{family.name}",
             )
             self.expect_status(name, instance_id, "ready")
@@ -568,6 +589,8 @@ class PrimaryScenario:
                 f"MK_COMPLEX_INSTANCE_READY family={family.name} id={instance_id} "
                 f"cpu={cpu} vf={vf.bdf} group={vf.iommu_group}"
             )
+
+            self.require_assigned_device(name, vf.bdf)
 
         # Every loaded peer gets its own mktty attachment.  The initial ID
         # write selects the endpoint before the guest is started, just as
@@ -686,7 +709,7 @@ class PrimaryScenario:
                 f"--id={instance_id}",
                 "--cpus=2",
                 "--memory=64MB",
-                f"--devices={pool_device_name(vf)}",
+                f"--devices={vf.bdf}",
                 stage=f"respawn-create-{cycle}",
             )
             self.expect_status(name, instance_id, "ready")
@@ -709,11 +732,12 @@ class PrimaryScenario:
         emit(f"MK_STAGE_POOL_OK size=1024M base={self.pool_base}")
         for family in PCI_FAMILIES:
             pf = self.family_pfs[family.name]
-            write_text(
-                Path("/sys/bus/pci/drivers_probe"),
-                f"{pf.bdf}\n",
-                f"pf-host-rebind-{family.name}",
-            )
+            if pf.driver != family.pf_driver:
+                write_text(
+                    Path("/sys/bus/pci/drivers_probe"),
+                    f"{pf.bdf}\n",
+                    f"pf-host-rebind-{family.name}",
+                )
             if not wait_until(lambda pf=pf, family=family: pf.driver == family.pf_driver):
                 raise ScenarioFailure(f"pf-host-rebind-{family.name}")
             netdevs = sorted((pf.path / "net").iterdir())
@@ -724,15 +748,28 @@ class PrimaryScenario:
             if family.name == "igb0":
                 self.pf_netdev = netdev
             command([BUSYBOX, "ip", "link", "set", netdev, "up"], f"pf-link-rebind-{family.name}")
-            command(
-                [BUSYBOX, "ip", "addr", "add", family.primary_address, "dev", netdev],
-                f"pf-address-rebind-{family.name}",
+            addresses = command(
+                [BUSYBOX, "ip", "-o", "addr", "show", "dev", netdev],
+                f"pf-address-show-{family.name}",
+                capture=True,
+            ).stdout
+            if family.primary_address not in addresses:
+                command(
+                    [BUSYBOX, "ip", "addr", "add", family.primary_address, "dev", netdev],
+                    f"pf-address-rebind-{family.name}",
+                )
+            vfs_present = all(
+                pf.virtual_function(index) is not None
+                for index in range(family.vf_count)
             )
-            write_text(
-                pf.path / "sriov_numvfs",
-                f"{family.vf_count}\n",
-                f"vf-recreate-{family.name}",
-            )
+            if not vfs_present:
+                if read_text(pf.path / "sriov_numvfs") != "0":
+                    raise ScenarioFailure(f"vf-count-inconsistent-{family.name}")
+                write_text(
+                    pf.path / "sriov_numvfs",
+                    f"{family.vf_count}\n",
+                    f"vf-recreate-{family.name}",
+                )
             if not wait_until(
                 lambda pf=pf, family=family: all(
                     pf.virtual_function(index) is not None
@@ -741,11 +778,12 @@ class PrimaryScenario:
             ):
                 raise ScenarioFailure(f"vf-recreate-{family.name}")
             for index, vf in enumerate(self.family_vfs[family.name]):
-                write_text(
-                    Path("/sys/bus/pci/drivers_probe"),
-                    f"{vf.bdf}\n",
-                    f"vf-host-rebind-{family.name}-{index}",
-                )
+                if vf.driver != family.vf_driver:
+                    write_text(
+                        Path("/sys/bus/pci/drivers_probe"),
+                        f"{vf.bdf}\n",
+                        f"vf-host-rebind-{family.name}-{index}",
+                    )
                 if not wait_until(lambda vf=vf, family=family: vf.driver == family.vf_driver):
                     raise ScenarioFailure(f"vf-host-rebind-{family.name}-{index}")
         vf = self.assigned_vf
@@ -766,7 +804,7 @@ class PrimaryScenario:
             101,
             2,
             "64MB",
-            pool_device_name(self.pf),
+            self.pf.bdf,
             "igbvf",
         )
         self.expect_create_rejected(
@@ -775,7 +813,7 @@ class PrimaryScenario:
             102,
             2,
             "64MB",
-            f"{pool_device_name(vf)},{pool_device_name(vf)}",
+            f"{vf.bdf},{vf.bdf}",
             "igbvf",
         )
         kerf(
@@ -784,7 +822,7 @@ class PrimaryScenario:
             "--id=1",
             "--cpus=2",
             "--memory=256MB",
-            f"--devices={pool_device_name(vf)}",
+            f"--devices={vf.bdf}",
             stage="kerf-create",
         )
         emit("MK_STAGE_KERF_CREATE_OK id=1")
@@ -815,7 +853,7 @@ class PrimaryScenario:
             103,
             3,
             "128MB",
-            pool_device_name(vf),
+            vf.bdf,
             ASSIGNMENT_DRIVER,
         )
         emit(
@@ -827,10 +865,8 @@ class PrimaryScenario:
             f"vf={vf.bdf} group={vf.iommu_group}"
         )
         self.hostile_lease_attempts("ready")
-        device_tree = (INSTANCES / "qemu-demo/device_tree").read_bytes()
-        if vf.bdf.encode("ascii") not in device_tree:
-            raise ScenarioFailure("vf-instance-dtb")
-        emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource={pool_device_name(vf)}")
+        self.require_assigned_device("qemu-demo", vf.bdf)
+        emit(f"MK_STAGE_VF_ASSIGNED id=1 vf={vf.bdf} resource={vf.bdf}")
         # TCG can delay an isolated vCPU long enough for the jiffies
         # watchdog to reject QEMU's otherwise stable shared TSC.
         kerf(
@@ -919,7 +955,7 @@ class PrimaryScenario:
                 f"--id={cycle}",
                 "--cpus=2",
                 "--memory=256MB",
-                f"--devices={pool_device_name(vf)}",
+                f"--devices={vf.bdf}",
                 stage=f"repeat-create-{cycle}",
             )
             self.expect_status(name, cycle, "ready")
@@ -943,7 +979,7 @@ class PrimaryScenario:
             "--id=104",
             "--cpus=2",
             "--memory=256MB",
-            f"--devices={pool_device_name(vf)}",
+            f"--devices={vf.bdf}",
             stage="hostile-unbind-create",
         )
         self.expect_status("hostile-unbind", 104, "ready")

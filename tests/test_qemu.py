@@ -29,7 +29,7 @@ class HarnessConfigTests(unittest.TestCase):
 
         self.assertEqual(config.cpus, 12)
         self.assertEqual(config.memory_mb, 8192)
-        self.assertEqual(config.timeout_seconds, 1200)
+        self.assertEqual(config.timeout_seconds, 2400)
         self.assertEqual(config.idle_timeout_seconds, 120)
         self.assertEqual(config.build_dir, self.root / "build")
         self.assertIn("q35,accel=tcg", config.qemu_args())

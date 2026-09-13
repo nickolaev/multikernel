@@ -200,8 +200,10 @@ class SecondaryScenario:
         self.sink = sink
         self.sysfs = sysfs
         self.config_stress: PciConfigStress | None = None
+        self.failed = False
 
     def fail(self, reason: str, **fields: object) -> None:
+        self.failed = True
         self.sink.emit(
             "MK_SECONDARY_FAIL",
             instance=self.config.instance,
@@ -548,6 +550,8 @@ class SecondaryScenario:
             netdev = ""
         if netdev:
             self.reset_vf(vf_path)
+        if self.failed:
+            raise RuntimeError("secondary validation failed")
         self.config_stress = PciConfigStress(config, self.sink, vf_path / "config")
         self.config_stress.start()
         self.sink.emit("MK_SECONDARY_ALIVE", instance=config.instance, pid=os.getpid())

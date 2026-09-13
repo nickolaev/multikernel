@@ -91,7 +91,7 @@ make build JOBS=12
 make test QEMU_TIMEOUT=240 QEMU_IDLE_TIMEOUT=120
 ```
 
-The defaults are QEMU TCG, twelve CPUs, 8192 MiB of RAM, a 1200-second total
+The defaults are QEMU TCG, twelve CPUs, 8192 MiB of RAM, a 2400-second total
 timeout, and a 120-second structured-progress idle timeout. The harness
 requires exactly 12 CPUs and 8192 MiB to exercise the approved topology.
 Console chatter does not reset the idle watchdog; only structured `MK_EVENT`

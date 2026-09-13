@@ -194,6 +194,23 @@ class SecondaryAgentTests(unittest.TestCase):
             self.assertNotIn("MK_SECONDARY_VF_REBIND_PASS", event_names)
             self.assertNotIn("MK_SECONDARY_VF_FLR_PASS", event_names)
 
+    def test_run_does_not_report_alive_after_validation_failure(self):
+        config = SecondaryConfig(parse_cmdline("mk_vf_bdf=0000:00:12.0"))
+        sink = RecordingSink()
+        scenario = SecondaryScenario(config, sink)
+        scenario.verify_identity_and_bar = lambda _path: scenario.fail(
+            "vf-not-enumerated", bdf=config.vf_bdf
+        )
+        scenario.verify_scope = lambda: None
+        scenario.configure_vf = lambda _path: ""
+
+        with self.assertRaisesRegex(RuntimeError, "secondary validation failed"):
+            scenario.run()
+
+        event_names = [event for event, _fields in sink.events]
+        self.assertIn("MK_SECONDARY_FAIL", event_names)
+        self.assertNotIn("MK_SECONDARY_ALIVE", event_names)
+
 
 if __name__ == "__main__":
     unittest.main()

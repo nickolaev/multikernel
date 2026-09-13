@@ -153,6 +153,8 @@ def wait_for_alive(
                         event = decode_event(line)
                     except ValueError:
                         continue
+                    if event["event"] == "MK_SECONDARY_FAIL":
+                        return False
                     if event["event"] == "MK_SECONDARY_ALIVE":
                         event_instance = event["fields"].get("instance")
                         if str(event_instance).isdigit():

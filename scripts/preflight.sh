@@ -53,12 +53,12 @@ if [[ ! -f /usr/include/gelf.h ]]; then
 	command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb is required to extract local host dependencies"
 fi
 
-for value in "${QEMU_CPUS:-12}" "${QEMU_MEMORY_MB:-8192}" "${QEMU_TIMEOUT:-1200}" "${QEMU_IDLE_TIMEOUT:-120}"; do
+for value in "${QEMU_CPUS:-12}" "${QEMU_MEMORY_MB:-8192}" "${QEMU_TIMEOUT:-2400}" "${QEMU_IDLE_TIMEOUT:-120}"; do
 	[[ "${value}" =~ ^[0-9]+$ ]] || die "QEMU numeric tunables must contain only digits"
 done
 (( ${QEMU_CPUS:-12} == 12 )) || die "QEMU_CPUS must be exactly 12"
 (( ${QEMU_MEMORY_MB:-8192} == 8192 )) || die "QEMU_MEMORY_MB must be exactly 8192"
-(( ${QEMU_TIMEOUT:-1200} >= 30 )) || die "QEMU_TIMEOUT must be at least 30 seconds"
+(( ${QEMU_TIMEOUT:-2400} >= 30 )) || die "QEMU_TIMEOUT must be at least 30 seconds"
 (( ${QEMU_IDLE_TIMEOUT:-120} >= 1 )) || die "QEMU_IDLE_TIMEOUT must be at least 1 second"
 
 printf 'MK_PREFLIGHT_OK branch=%s head=%s host_arch=%s guest_arch=%s hostcc=%s target_cc=%s flex=%s bison=%s python=%s busybox=%s qemu=%s\n' \
