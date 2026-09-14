@@ -9,6 +9,7 @@ from pathlib import Path
 from harness.events import encode_event
 from harness.qemu import (
     FAILURE_MARKERS,
+    KERNEL_FAILURE_MARKERS,
     FORBIDDEN_RELIABILITY_COUNTERS,
     REQUIRED_EVENT_NAMES,
     REQUIRED_MARKERS,
@@ -107,6 +108,14 @@ class LogValidationTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 with self.assertRaisesRegex(HarnessError, "guest-failure-marker"):
                     validate_log(f"{marker} reason=test")
+
+    def test_rejects_atomic_and_lockdep_diagnostics(self) -> None:
+        for marker in KERNEL_FAILURE_MARKERS:
+            with self.subTest(marker=marker):
+                with self.assertRaisesRegex(
+                    HarnessError, "kernel-diagnostic-marker"
+                ):
+                    validate_log(self.complete_log() + "\n" + marker)
 
     def test_reports_missing_marker(self) -> None:
         present = "\n".join(

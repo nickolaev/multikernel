@@ -98,6 +98,16 @@ REQUIRED_MARKERS = (
     "MK_DEMO_PASS simultaneous_kernels=verified",
 )
 FAILURE_MARKERS = ("MK_DEMO_FAIL", "MK_SECONDARY_FAIL")
+KERNEL_FAILURE_MARKERS = (
+    "BUG: sleeping function called from invalid context",
+    "BUG: scheduling while atomic",
+    "WARNING: possible circular locking dependency detected",
+    "WARNING: possible recursive locking detected",
+    "WARNING: inconsistent lock state",
+    "WARNING: bad unlock balance detected",
+    "[ BUG: Invalid wait context ]",
+    "DEBUG_LOCKS_WARN_ON",
+)
 REQUIRED_EVENT_NAMES = (
     "MK_STAGE_IOMMU_DOMAIN",
     "MK_SECONDARY_VF_DATAPATH",
@@ -367,6 +377,9 @@ def validate_log(log_text: str) -> None:
     for marker in FAILURE_MARKERS:
         if marker in log_text:
             raise HarnessError("guest-failure-marker")
+    for marker in KERNEL_FAILURE_MARKERS:
+        if marker in log_text:
+            raise HarnessError(f"kernel-diagnostic-marker marker={marker!r}")
     for marker in REQUIRED_MARKERS:
         if marker not in log_text:
             raise HarnessError(f"missing-marker marker={marker!r}")
