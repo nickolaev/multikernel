@@ -91,7 +91,9 @@ REQUIRED_MARKERS = (
     "MK_COMPLEX_HOSTILE_CONTAINED family=igb1",
     "MK_COMPLEX_HOSTILE_CONTAINED family=igb2",
     "MK_COMPLEX_CONCURRENT_LEASES_PASS leases=3 active_instances=3 families=igb0,igb1,igb2",
-    "MK_RESPAWN_STRESS_PASS cycles=100",
+    "MK_PEER_RESET_SURVIVOR_PASS victim=3 survivor=2",
+    "MK_LEASE_LIFECYCLE_STRESS_PASS cycles=100",
+    "MK_RELAUNCH_STRESS_PASS cycles=3 launches=6 halts=6",
     "MK_COMPLEX_UNASSIGNED_VFS_INTACT count=5 families=3 owner=host",
     "MK_COMPLEX_RESTORED families=3 vfs=8 ownership=host",
     "MK_STAGE_VF_TEARDOWN pf=0000:00:02.0 vfs=0",
@@ -120,7 +122,9 @@ REQUIRED_EVENT_NAMES = (
     "MK_HALTED_IRQ_QUIESCE_PASS",
     "MK_RESTART_VF_DATAPATH_PASS",
     "MK_COMPLEX_CONCURRENT_LEASES_PASS",
-    "MK_RESPAWN_STRESS_PASS",
+    "MK_PEER_RESET_SURVIVOR_PASS",
+    "MK_LEASE_LIFECYCLE_STRESS_PASS",
+    "MK_RELAUNCH_STRESS_PASS",
     "MK_COMPLEX_RESTORED",
     "MK_DEMO_PASS",
 )
@@ -340,7 +344,7 @@ def _validate_counter_evidence(events: Sequence[dict[str, object]]) -> None:
 
 
 def _validate_multi_child_evidence(events: Sequence[dict[str, object]]) -> None:
-    """Require proof of three active children and 100 respawn cycles."""
+    """Require proof of three active children and lease/relaunch cycles."""
     lease_events = [
         event for event in events
         if event.get("event") == "MK_COMPLEX_CONCURRENT_LEASES_PASS"
@@ -357,20 +361,57 @@ def _validate_multi_child_evidence(events: Sequence[dict[str, object]]) -> None:
     if active_instances < 3:
         raise HarnessError(f"missing-multi-child-proof active_instances={active_instances}")
 
-    respawn_events = [
-        event for event in events if event.get("event") == "MK_RESPAWN_STRESS_PASS"
+    lease_events = [
+        event for event in events if event.get("event") == "MK_LEASE_LIFECYCLE_STRESS_PASS"
     ]
-    if len(respawn_events) != 1:
-        raise HarnessError("missing-respawn-proof")
-    fields = respawn_events[0].get("fields")
+    if len(lease_events) != 1:
+        raise HarnessError("missing-lease-lifecycle-proof")
+    fields = lease_events[0].get("fields")
     if not isinstance(fields, dict):
-        raise HarnessError("missing-respawn-proof cycles")
+        raise HarnessError("missing-lease-lifecycle-proof cycles")
     try:
         cycles = int(fields["cycles"])
     except (KeyError, TypeError, ValueError) as error:
-        raise HarnessError("missing-respawn-proof cycles") from error
+        raise HarnessError("missing-lease-lifecycle-proof cycles") from error
     if cycles < 100:
-        raise HarnessError(f"missing-respawn-proof cycles={cycles}")
+        raise HarnessError(f"missing-lease-lifecycle-proof cycles={cycles}")
+
+    relaunch_events = [
+        event for event in events if event.get("event") == "MK_RELAUNCH_STRESS_PASS"
+    ]
+    if len(relaunch_events) != 1:
+        raise HarnessError("missing-relaunch-proof")
+    fields = relaunch_events[0].get("fields")
+    if not isinstance(fields, dict):
+        raise HarnessError("missing-relaunch-proof fields")
+    try:
+        cycles = int(fields["cycles"])
+        launches = int(fields["launches"])
+        halts = int(fields["halts"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise HarnessError("missing-relaunch-proof fields") from error
+    if cycles < 3 or launches < 6 or halts < 6:
+        raise HarnessError(
+            f"missing-relaunch-proof cycles={cycles} launches={launches} halts={halts}"
+        )
+
+    survivor_events = [
+        event for event in events if event.get("event") == "MK_PEER_RESET_SURVIVOR_PASS"
+    ]
+    if len(survivor_events) != 1:
+        raise HarnessError("missing-peer-reset-survivor-proof")
+    fields = survivor_events[0].get("fields")
+    if not isinstance(fields, dict):
+        raise HarnessError("missing-peer-reset-survivor-proof fields")
+    try:
+        victim = int(fields["victim"])
+        survivor = int(fields["survivor"])
+        baseline_reads = int(fields["baseline_reads"])
+        survivor_reads = int(fields["survivor_reads"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise HarnessError("missing-peer-reset-survivor-proof fields") from error
+    if victim == survivor or baseline_reads < 0 or survivor_reads <= baseline_reads:
+        raise HarnessError("missing-peer-reset-survivor-proof reads")
 
 
 def validate_log(log_text: str) -> None:

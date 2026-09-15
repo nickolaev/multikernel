@@ -122,6 +122,16 @@ def baseline_device_name(function: PciFunction) -> str:
     return f"pci_{int(domain, 16):04x}_{int(bus, 16):02x}_{int(slot, 16):02x}_{int(func)}"
 
 
+def _event_int_field(event: dict[str, object], name: str) -> int | None:
+    fields = event.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    try:
+        return int(fields[name])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def wait_until(predicate, attempts: int = 50) -> bool:
     for _ in range(attempts):
         if predicate():
@@ -636,6 +646,83 @@ class PrimaryScenario:
                 self.expect_status(name, instance_id, "active")
                 emit(f"MK_COMPLEX_INSTANCE_ACTIVE family={family.name} id={instance_id}")
 
+            survivor_id = cases[0][2]
+            _victim_family, victim_name, victim_id, _victim_cpu = cases[1]
+            survivor_reader = ConsoleEventReader(
+                peer_consoles[survivor_id],
+                lambda line: emit(f"MK_SECONDARY_STREAM instance={survivor_id}:{line}"),
+            )
+            victim_reader = ConsoleEventReader(
+                peer_consoles[victim_id],
+                lambda line: emit(f"MK_SECONDARY_STREAM instance={victim_id}:{line}"),
+            )
+            progress_event = "MK_SECONDARY_PCI_CONFIG_STRESS_PROGRESS"
+            baseline = survivor_reader.wait_for_event(
+                progress_event,
+                timeout=30,
+                predicate=lambda event: event["fields"].get("instance") == survivor_id,
+            )
+            if baseline is None:
+                raise ScenarioFailure("peer-reset-survivor-baseline")
+            try:
+                baseline_reads = int(baseline["fields"]["reads"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ScenarioFailure("peer-reset-survivor-baseline") from error
+
+            kerf("kill", victim_name, stage="peer-reset-victim-kill")
+            self.expect_status(victim_name, victim_id, "loaded")
+            try:
+                halted_baseline = survivor_reader.drain_for_event(
+                    progress_event,
+                    predicate=lambda event: (
+                        event["fields"].get("instance") == survivor_id
+                    ),
+                    idle_timeout=0.25,
+                    timeout=5,
+                )
+            except TimeoutError as error:
+                raise ScenarioFailure(
+                    "peer-reset-survivor-baseline-drain"
+                ) from error
+            if halted_baseline is not None:
+                drained_reads = _event_int_field(halted_baseline, "reads")
+                if drained_reads is None:
+                    raise ScenarioFailure("peer-reset-survivor-baseline-drain")
+                baseline_reads = max(baseline_reads, drained_reads)
+
+            survivor_progress = survivor_reader.wait_for_event(
+                progress_event,
+                timeout=30,
+                predicate=lambda event: (
+                    event["fields"].get("instance") == survivor_id
+                    and (
+                        (reads := _event_int_field(event, "reads")) is not None
+                        and reads > baseline_reads
+                    )
+                ),
+            )
+            if survivor_progress is None:
+                raise ScenarioFailure("peer-reset-survivor-progress")
+            try:
+                survivor_reads = int(survivor_progress["fields"]["reads"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ScenarioFailure("peer-reset-survivor-progress") from error
+            self.expect_status(victim_name, victim_id, "loaded")
+            kerf("exec", victim_name, stage="peer-reset-victim-reexec")
+            self.expect_status(victim_name, victim_id, "active")
+            restarted = victim_reader.wait_for_event(
+                "MK_SECONDARY_ALIVE",
+                timeout=180,
+                predicate=lambda event: event["fields"].get("instance") == victim_id,
+            )
+            if restarted is None:
+                raise ScenarioFailure("peer-reset-victim-alive")
+            emit(
+                "MK_PEER_RESET_SURVIVOR_PASS "
+                f"victim={victim_id} survivor={survivor_id} "
+                f"baseline_reads={baseline_reads} survivor_reads={survivor_reads}"
+            )
+
         unassigned = 0
         for family in PCI_FAMILIES:
             for vf in self.family_vfs[family.name][1:]:
@@ -697,11 +784,76 @@ class PrimaryScenario:
         self.assert_vf_owner(ASSIGNMENT_DRIVER, "complex-peers-restored")
         emit("MK_COMPLEX_PEERS_RESTORED peers=2 primary_state=active")
 
-    def run_respawn_stress(self) -> None:
-        """Create and fully tear down 100 real VF-backed instance lifecycles."""
+    def run_relaunch_stress(self) -> None:
+        """Exercise repeated guest launch, halt, and relaunch lifecycles."""
+        vf = self.assigned_vf
+        family = PCI_FAMILIES[0]
+        for cycle in range(1, 4):
+            name = f"qemu-relaunch-{cycle}"
+            instance_id = 300 + cycle
+            kerf(
+                "create",
+                name,
+                f"--id={instance_id}",
+                "--cpus=2",
+                "--memory=256MB",
+                f"--devices={vf.bdf}",
+                stage=f"relaunch-create-{cycle}",
+            )
+            self.expect_status(name, instance_id, "ready")
+            self.require_assigned_device(name, vf.bdf)
+            kerf(
+                "load",
+                name,
+                "--kernel=/payload/vmlinux",
+                "--initrd=/payload/secondary-initrd.cpio.gz",
+                f"--cmdline={self._secondary_cmdline(family, instance_id, vf)}",
+                "--console=mktty0",
+                stage=f"relaunch-load-{cycle}",
+            )
+            self.expect_status(name, instance_id, "loaded")
+            with self._open_console(instance_id) as console:
+                kerf("exec", name, stage=f"relaunch-exec-{cycle}")
+                self.expect_status(name, instance_id, "active")
+                if not wait_for_alive(
+                    {instance_id: console},
+                    timeout=180,
+                    on_line=lambda instance, line: emit(
+                        f"MK_SECONDARY_STREAM instance={instance}:{line}"
+                    ),
+                ):
+                    raise ScenarioFailure(f"relaunch-alive-{cycle}")
+                emit(f"MK_RELAUNCH_ACTIVE_PASS cycle={cycle} instance={instance_id}")
+                kerf("kill", name, stage=f"relaunch-kill-{cycle}")
+                self.expect_status(name, instance_id, "loaded")
+                kerf("exec", name, stage=f"relaunch-reexec-{cycle}")
+                self.expect_status(name, instance_id, "active")
+                if not wait_for_alive(
+                    {instance_id: console},
+                    timeout=180,
+                    on_line=lambda instance, line: emit(
+                        f"MK_SECONDARY_STREAM instance={instance}:{line}"
+                    ),
+                ):
+                    raise ScenarioFailure(f"relaunch-realive-{cycle}")
+                emit(f"MK_RELAUNCH_RESTART_PASS cycle={cycle} instance={instance_id}")
+                kerf("kill", name, stage=f"relaunch-final-kill-{cycle}")
+                self.expect_status(name, instance_id, "loaded")
+            kerf("unload", name, stage=f"relaunch-unload-{cycle}")
+            self.expect_status(name, instance_id, "ready")
+            kerf("delete", name, stage=f"relaunch-delete-{cycle}")
+            if (INSTANCES / name).exists():
+                raise ScenarioFailure(f"relaunch-instance-{cycle}")
+            if not wait_until(lambda: vf.driver == self.vf_host_driver):
+                raise ScenarioFailure(f"relaunch-restore-{cycle}")
+            self.assert_pf_owned(f"relaunch-restored-{cycle}")
+        emit("MK_RELAUNCH_STRESS_PASS cycles=3 launches=6 halts=6")
+
+    def run_lease_lifecycle_stress(self) -> None:
+        """Create and fully tear down 100 VF lease lifecycles."""
         vf = self.assigned_vf
         for cycle in range(100):
-            name = f"qemu-respawn-{cycle}"
+            name = f"qemu-lease-{cycle}"
             instance_id = 200 + cycle
             kerf(
                 "create",
@@ -710,17 +862,17 @@ class PrimaryScenario:
                 "--cpus=2",
                 "--memory=64MB",
                 f"--devices={vf.bdf}",
-                stage=f"respawn-create-{cycle}",
+                stage=f"lease-create-{cycle}",
             )
             self.expect_status(name, instance_id, "ready")
-            self.assert_vf_owner(ASSIGNMENT_DRIVER, f"respawn-assigned-{cycle}")
-            kerf("delete", name, stage=f"respawn-delete-{cycle}")
+            self.assert_vf_owner(ASSIGNMENT_DRIVER, f"lease-assigned-{cycle}")
+            kerf("delete", name, stage=f"lease-delete-{cycle}")
             if (INSTANCES / name).exists():
-                raise ScenarioFailure(f"respawn-instance-{cycle}")
+                raise ScenarioFailure(f"lease-instance-{cycle}")
             if not wait_until(lambda: vf.driver == self.vf_host_driver):
-                raise ScenarioFailure(f"respawn-restore-{cycle}")
-            self.assert_pf_owned(f"respawn-restored-{cycle}")
-        emit("MK_RESPAWN_STRESS_PASS cycles=100")
+                raise ScenarioFailure(f"lease-restore-{cycle}")
+            self.assert_pf_owned(f"lease-restored-{cycle}")
+        emit("MK_LEASE_LIFECYCLE_STRESS_PASS cycles=100")
 
     def run(self) -> None:
         self.allocate_pool()
@@ -972,7 +1124,8 @@ class PrimaryScenario:
                 raise ScenarioFailure(f"repeat-restore-{cycle}")
             self.assert_pf_owned(f"repeat-restore-{cycle}")
             emit(f"MK_REPEAT_CYCLE_PASS cycle={cycle} vf={vf.bdf} restoration=verified")
-        self.run_respawn_stress()
+        self.run_relaunch_stress()
+        self.run_lease_lifecycle_stress()
         kerf(
             "create",
             "hostile-unbind",
@@ -1023,7 +1176,7 @@ class PrimaryScenario:
             "MK_DEMO_PASS simultaneous_kernels=verified iommu=verified "
             "vf_lease=verified hostile_attempts=verified repeat_cycles=3 "
             "fail_closed=verified complex_topology=verified "
-            "concurrent_leases=3 active_instances=3 respawn_cycles=100"
+            "concurrent_leases=3 active_instances=3 lease_cycles=100 relaunch_cycles=3"
         )
 
 

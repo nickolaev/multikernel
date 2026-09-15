@@ -86,10 +86,15 @@ class LogValidationTests(unittest.TestCase):
                 ({"max_cpus": 9} if event == "MK_CONCURRENT_CPU_PCI_RPC_PASS" else
                  ({"active_instances": 3, "leases": 3}
                   if event == "MK_COMPLEX_CONCURRENT_LEASES_PASS" else
-                  ({"cycles": 100} if event == "MK_RESPAWN_STRESS_PASS" else
+                  ({"cycles": 100} if event == "MK_LEASE_LIFECYCLE_STRESS_PASS" else
+                   ({"cycles": 3, "launches": 6, "halts": 6}
+                    if event == "MK_RELAUNCH_STRESS_PASS" else
+                    ({"victim": 3, "survivor": 2, "baseline_reads": 1024,
+                      "survivor_reads": 2048}
+                     if event == "MK_PEER_RESET_SURVIVOR_PASS" else
                    ({name: 0 for name in FORBIDDEN_RELIABILITY_COUNTERS} |
                     {"tx_before": 0, "tx_after": 1, "rx_before": 0, "rx_after": 1}
-                    if event == "MK_SECONDARY_VF_DATAPATH" else {})))),
+                    if event == "MK_SECONDARY_VF_DATAPATH" else {})))))),
                 "primary",
             )
             for event in REQUIRED_EVENT_NAMES
@@ -102,6 +107,24 @@ class LogValidationTests(unittest.TestCase):
 
     def test_accepts_complete_log(self) -> None:
         validate_log(self.complete_log())
+
+    def test_rejects_short_relaunch_claim(self) -> None:
+        log = self.complete_log().replace(
+            '"cycles":3,"halts":6,"launches":6',
+            '"cycles":2,"halts":4,"launches":4',
+        )
+        with self.assertRaisesRegex(HarnessError, "missing-relaunch-proof"):
+            validate_log(log)
+
+    def test_rejects_survivor_claim_without_progress(self) -> None:
+        log = self.complete_log().replace(
+            '"baseline_reads":1024,"survivor":2,"survivor_reads":2048,"victim":3',
+            '"baseline_reads":2048,"survivor":2,"survivor_reads":1024,"victim":3',
+        )
+        with self.assertRaisesRegex(
+            HarnessError, "missing-peer-reset-survivor-proof"
+        ):
+            validate_log(log)
 
     def test_rejects_guest_failure_markers(self) -> None:
         for marker in FAILURE_MARKERS:
@@ -214,11 +237,11 @@ class LogValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(HarnessError, "missing-multi-child-proof"):
             validate_log(complete)
 
-    def test_rejects_short_respawn_claim(self) -> None:
+    def test_rejects_short_lease_lifecycle_claim(self) -> None:
         complete = self.complete_log().replace(
             '"cycles":100', '"cycles":99'
         )
-        with self.assertRaisesRegex(HarnessError, "missing-respawn-proof"):
+        with self.assertRaisesRegex(HarnessError, "missing-lease-lifecycle-proof"):
             validate_log(complete)
 
 
