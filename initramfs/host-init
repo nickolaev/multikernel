@@ -19,7 +19,18 @@ mount -t proc proc /proc || fail mount-proc
 mount -t sysfs sysfs /sys || fail mount-sysfs
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 
-/usr/bin/python3 -m harness.primary
+case " $(cat /proc/cmdline) " in
+    *" mk_transport_test=1 "*) module=harness.transport_primary ;;
+    *) module=harness.primary ;;
+esac
+
+/usr/bin/python3 -m "${module}"
 status=$?
+if [ "${module}" = harness.transport_primary ] && [ "${status}" -eq 0 ]; then
+    printf 'MK_TRANSPORT_HOST_PASS\n'
+    sync
+    poweroff -f
+    while :; do sleep 1; done
+fi
 printf 'MK_DEMO_FAIL stage=primary-python-exit status=%s\n' "${status}"
 fail primary-python-returned

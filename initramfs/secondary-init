@@ -11,7 +11,12 @@ mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 
-/usr/bin/python3 -S -m harness.secondary
+case " $(cat /proc/cmdline) " in
+    *" mk_transport_test=1 "*) module=harness.transport_secondary ;;
+    *) module=harness.secondary ;;
+esac
+
+/usr/bin/python3 -S -m "${module}"
 status=$?
 printf 'MK_SECONDARY_FAIL reason=python-exit status=%s\n' "${status}" >/dev/console
 sync

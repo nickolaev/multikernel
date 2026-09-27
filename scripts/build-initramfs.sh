@@ -24,13 +24,14 @@ for applet in sh mount mkdir cat grep sleep poweroff timeout sync; do
 done
 
 if [[ "${mode}" == host ]]; then
-	[[ $# -eq 10 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE\n' >&2; exit 1; }
+	[[ $# -eq 11 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE RING_TEST_MODULE\n' >&2; exit 1; }
 	kerf_runtime=$5
 	kernel=$6
 	secondary_initrd=$7
 	lazy_cma_module=$8
 	lazy_cma_tool=$9
 	harness_package=${10}
+	ring_test_module=${11}
 	cp -a "${kerf_runtime}/." "${root}/"
 	mkdir -p "${root}/assets" "${root}/payload" "${root}/lib/modules"
 	mkdir -p "${root}/usr/lib/python3/dist-packages/harness"
@@ -38,19 +39,24 @@ if [[ "${mode}" == host ]]; then
 	install -m 0644 "${kernel}" "${root}/payload/vmlinux"
 	install -m 0644 "${secondary_initrd}" "${root}/payload/secondary-initrd.cpio.gz"
 	install -m 0644 "${lazy_cma_module}" "${root}/lib/modules/lazy_cma.ko"
+	install -m 0644 "${ring_test_module}" "${root}/lib/modules/mk_ring_test.ko"
 	install -m 0755 "${lazy_cma_tool}" "${root}/bin/lazy_cma_tool"
 elif [[ "${mode}" == secondary ]]; then
-	[[ $# -eq 6 ]] || { printf 'secondary mode requires PYTHON_RUNTIME HARNESS_PACKAGE\n' >&2; exit 1; }
+	[[ $# -eq 7 ]] || { printf 'secondary mode requires PYTHON_RUNTIME HARNESS_PACKAGE RING_TEST_MODULE\n' >&2; exit 1; }
 	python_runtime=$5
 	harness_package=$6
+	ring_test_module=$7
 	cp -a "${python_runtime}/." "${root}/"
-	mkdir -p "${root}/usr/lib/python3/dist-packages/harness"
+	mkdir -p "${root}/usr/lib/python3/dist-packages/harness" "${root}/lib/modules"
+	install -m 0644 "${ring_test_module}" "${root}/lib/modules/mk_ring_test.ko"
 	install -m 0644 "${harness_package}/__init__.py" \
 		"${root}/usr/lib/python3/dist-packages/harness/__init__.py"
 	install -m 0644 "${harness_package}/secondary.py" \
 		"${root}/usr/lib/python3/dist-packages/harness/secondary.py"
 	install -m 0644 "${harness_package}/events.py" \
 		"${root}/usr/lib/python3/dist-packages/harness/events.py"
+	install -m 0644 "${harness_package}/transport_secondary.py" \
+		"${root}/usr/lib/python3/dist-packages/harness/transport_secondary.py"
 elif [[ "${mode}" != host ]]; then
 	printf 'unknown initramfs mode: %s\n' "${mode}" >&2
 	exit 1

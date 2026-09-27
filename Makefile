@@ -10,6 +10,7 @@ HOST_DEPS := $(BUILD_DIR)/host-deps/root
 KERF_RUNTIME := $(BUILD_DIR)/kerf-runtime
 GUEST_SYSROOT := $(BUILD_DIR)/guest-sysroot
 LAZY_CMA_BUILD := $(BUILD_DIR)/lazy-cma
+RING_TEST_BUILD := $(BUILD_DIR)/mk-ring-test
 GUEST_TOOLS := $(BUILD_DIR)/guest-tools
 GUEST_BUSYBOX := $(GUEST_TOOLS)/busybox-x86_64
 KERF_PYTHON_SOURCES := $(shell find '$(KERF_DIR)/src/kerf' -type f -name '*.py' 2>/dev/null)
@@ -29,6 +30,7 @@ QEMU_CPUS ?= 12
 QEMU_MEMORY_MB ?= 8192
 QEMU_TIMEOUT ?= 2400
 QEMU_IDLE_TIMEOUT ?= 120
+override TRANSPORT_KERNEL_SHA := be70d51dec2bc493c8a5914d28f16afe0e93edcc
 LEX := $(shell command -v flex 2>/dev/null)
 YACC := $(shell command -v bison 2>/dev/null)
 
@@ -37,7 +39,7 @@ SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
 
-.PHONY: all preflight config kernel kerf-runtime lazy-cma initrd build unit-test run test clean help FORCE
+.PHONY: all preflight config kernel kerf-runtime lazy-cma ring-test-module initrd build unit-test run test transport-preflight transport-test clean help FORCE
 
 all: build
 
@@ -53,6 +55,7 @@ help:
 	  'make unit-test    - run the Python harness unit tests' \
 	  'make run          - run QEMU interactively on the serial console' \
 	  'make test         - run QEMU and assert all proof markers' \
+	  'make transport-test - run the three-child transport-only restart gate' \
 	  'make clean        - remove only the top-level build directory'
 
 $(GUEST_BUSYBOX): $(ROOT)/scripts/prepare-guest-busybox.sh
@@ -116,16 +119,28 @@ $(LAZY_CMA_BUILD)/.ready: $(KERNEL) $(ROOT)/config/lazy-cma.Kbuild $(LAZY_CMA_SO
 
 lazy-cma: $(LAZY_CMA_BUILD)/.ready
 
-$(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-initramfs.sh \
-		$(KERF_RUNTIME)/.ready $(HARNESS_PYTHON_SOURCES) | preflight
-	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<' \
-		'$(KERF_RUNTIME)' '$(ROOT)/harness'
+$(RING_TEST_BUILD)/.ready: $(KERNEL) $(ROOT)/config/mk-ring-test.Kbuild \
+		$(ROOT)/modules/mk_ring_test.c
+	rm -rf -- '$(RING_TEST_BUILD)'
+	mkdir -p '$(RING_TEST_BUILD)'
+	install -m 0644 '$(ROOT)/config/mk-ring-test.Kbuild' '$(RING_TEST_BUILD)/Makefile'
+	install -m 0644 '$(ROOT)/modules/mk_ring_test.c' '$(RING_TEST_BUILD)/'
+	$(MAKE) -C '$(KBUILD_DIR)' M='$(RING_TEST_BUILD)' ARCH='$(KERNEL_ARCH)' \
+		CROSS_COMPILE='$(CROSS_COMPILE)' HOSTCC='$(HOSTCC)' -j'$(JOBS)' modules
+	touch '$@'
 
-$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh
+ring-test-module: $(RING_TEST_BUILD)/.ready
+
+$(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-initramfs.sh \
+		$(KERF_RUNTIME)/.ready $(RING_TEST_BUILD)/.ready $(HARNESS_PYTHON_SOURCES) | preflight
+	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<' \
+		'$(KERF_RUNTIME)' '$(ROOT)/harness' '$(RING_TEST_BUILD)/mk_ring_test.ko'
+
+$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(RING_TEST_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh
 	'$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
 		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' \
 		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool' \
-		'$(ROOT)/harness'
+		'$(ROOT)/harness' '$(RING_TEST_BUILD)/mk_ring_test.ko'
 
 initrd: $(SECONDARY_INITRD) $(HOST_INITRD)
 
@@ -143,6 +158,27 @@ test: unit-test build
 	PYTHON='$(PYTHON)' QEMU='$(QEMU)' QEMU_CPUS='$(QEMU_CPUS)' \
 		QEMU_MEMORY_MB='$(QEMU_MEMORY_MB)' QEMU_TIMEOUT='$(QEMU_TIMEOUT)' \
 		QEMU_IDLE_TIMEOUT='$(QEMU_IDLE_TIMEOUT)' '$(ROOT)/scripts/run-qemu.sh' test
+
+transport-preflight:
+	'$(PYTHON)' -m harness.transport_pins \
+		--fixture-dir '$(ROOT)' --fixture-sha "$$(git -C '$(ROOT)' rev-parse HEAD)" \
+		--linux-dir '$(LINUX_DIR)' --linux-sha '$(TRANSPORT_KERNEL_SHA)' \
+		--kerf-dir '$(KERF_DIR)' --kerf-sha "$$(git -C '$(ROOT)' rev-parse HEAD:kerf)" \
+		--lazy-cma-dir '$(LAZY_CMA_DIR)' --lazy-cma-sha "$$(git -C '$(ROOT)' rev-parse HEAD:lazy_cma)"
+
+transport-test: transport-preflight unit-test
+	$(MAKE) LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' \
+		LAZY_CMA_DIR='$(LAZY_CMA_DIR)' BUILD_DIR='$(BUILD_DIR)' build
+	PYTHON='$(PYTHON)' QEMU='$(QEMU)' BUILD_DIR='$(BUILD_DIR)' \
+		QEMU_CPUS='$(QEMU_CPUS)' QEMU_MEMORY_MB='$(QEMU_MEMORY_MB)' \
+		QEMU_TIMEOUT='$(QEMU_TIMEOUT)' QEMU_IDLE_TIMEOUT='$(QEMU_IDLE_TIMEOUT)' \
+		TRANSPORT_KERNEL_SHA='$(TRANSPORT_KERNEL_SHA)' \
+		TRANSPORT_FIXTURE_SHA="$$(git -C '$(ROOT)' rev-parse HEAD)" \
+		TRANSPORT_KERF_SHA="$$(git -C '$(ROOT)' rev-parse HEAD:kerf)" \
+		TRANSPORT_LAZY_CMA_SHA="$$(git -C '$(ROOT)' rev-parse HEAD:lazy_cma)" \
+		TRANSPORT_LINUX_DIR='$(LINUX_DIR)' TRANSPORT_FIXTURE_DIR='$(ROOT)' \
+		TRANSPORT_KERF_DIR='$(KERF_DIR)' TRANSPORT_LAZY_CMA_DIR='$(LAZY_CMA_DIR)' \
+		'$(ROOT)/scripts/run-transport-qemu.sh' test
 
 clean:
 	rm -rf -- '$(BUILD_DIR)'
