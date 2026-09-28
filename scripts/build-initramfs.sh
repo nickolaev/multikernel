@@ -24,7 +24,7 @@ for applet in sh mount mkdir cat grep sleep poweroff timeout sync; do
 done
 
 if [[ "${mode}" == host ]]; then
-	[[ $# -eq 12 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_BZIMAGE SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE RING_TEST_MODULE\n' >&2; exit 1; }
+	[[ $# -eq 14 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_BZIMAGE SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE RING_TEST_MODULE BOOT_CONTRACT_MODULE REJECT_CONTRACT_MODULE\n' >&2; exit 1; }
 	kerf_runtime=$5
 	kernel=$6
 	bzimage=$7
@@ -33,6 +33,8 @@ if [[ "${mode}" == host ]]; then
 	lazy_cma_tool=${10}
 	harness_package=${11}
 	ring_test_module=${12}
+	boot_contract_module=${13}
+	reject_contract_module=${14}
 	cp -a "${kerf_runtime}/." "${root}/"
 	mkdir -p "${root}/assets" "${root}/payload" "${root}/lib/modules"
 	mkdir -p "${root}/usr/lib/python3/dist-packages/harness"
@@ -42,6 +44,10 @@ if [[ "${mode}" == host ]]; then
 	install -m 0644 "${secondary_initrd}" "${root}/payload/secondary-initrd.cpio.gz"
 	install -m 0644 "${lazy_cma_module}" "${root}/lib/modules/lazy_cma.ko"
 	install -m 0644 "${ring_test_module}" "${root}/lib/modules/mk_ring_test.ko"
+	install -m 0644 "${boot_contract_module}" \
+		"${root}/lib/modules/mk_boot_contract_test.ko"
+	install -m 0644 "${reject_contract_module}" \
+		"${root}/lib/modules/mk_reject_contract_test.ko"
 	install -m 0755 "${lazy_cma_tool}" "${root}/bin/lazy_cma_tool"
 elif [[ "${mode}" == secondary ]]; then
 	[[ $# -eq 7 ]] || { printf 'secondary mode requires PYTHON_RUNTIME HARNESS_PACKAGE RING_TEST_MODULE\n' >&2; exit 1; }
@@ -59,6 +65,8 @@ elif [[ "${mode}" == secondary ]]; then
 		"${root}/usr/lib/python3/dist-packages/harness/events.py"
 	install -m 0644 "${harness_package}/transport_secondary.py" \
 		"${root}/usr/lib/python3/dist-packages/harness/transport_secondary.py"
+	install -m 0644 "${harness_package}/contract_secondary.py" \
+		"${root}/usr/lib/python3/dist-packages/harness/contract_secondary.py"
 elif [[ "${mode}" != host ]]; then
 	printf 'unknown initramfs mode: %s\n' "${mode}" >&2
 	exit 1

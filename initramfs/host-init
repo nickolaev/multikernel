@@ -20,14 +20,20 @@ mount -t sysfs sysfs /sys || fail mount-sysfs
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 
 case " $(cat /proc/cmdline) " in
+    *" mk_contract_test="*) module=harness.contract_primary ;;
     *" mk_transport_test=1 "*) module=harness.transport_primary ;;
     *) module=harness.primary ;;
 esac
 
 /usr/bin/python3 -m "${module}"
 status=$?
-if [ "${module}" = harness.transport_primary ] && [ "${status}" -eq 0 ]; then
-    printf 'MK_TRANSPORT_HOST_PASS\n'
+if { [ "${module}" = harness.transport_primary ] ||
+     [ "${module}" = harness.contract_primary ]; } && [ "${status}" -eq 0 ]; then
+    if [ "${module}" = harness.contract_primary ]; then
+        printf 'MK_CONTRACT_HOST_PASS\n'
+    else
+        printf 'MK_TRANSPORT_HOST_PASS\n'
+    fi
     sync
     poweroff -f
     while :; do sleep 1; done

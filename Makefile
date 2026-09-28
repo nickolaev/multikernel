@@ -11,6 +11,7 @@ KERF_RUNTIME := $(BUILD_DIR)/kerf-runtime
 GUEST_SYSROOT := $(BUILD_DIR)/guest-sysroot
 LAZY_CMA_BUILD := $(BUILD_DIR)/lazy-cma
 RING_TEST_BUILD := $(BUILD_DIR)/mk-ring-test
+CONTRACT_TEST_BUILD := $(BUILD_DIR)/mk-contract-test
 GUEST_TOOLS := $(BUILD_DIR)/guest-tools
 GUEST_BUSYBOX := $(GUEST_TOOLS)/busybox-x86_64
 KERF_PYTHON_SOURCES := $(shell find '$(KERF_DIR)/src/kerf' -type f -name '*.py' 2>/dev/null)
@@ -39,7 +40,7 @@ SECONDARY_KERNEL := $(KBUILD_DIR)/vmlinux
 SECONDARY_INITRD := $(BUILD_DIR)/secondary-initrd.cpio.gz
 HOST_INITRD := $(BUILD_DIR)/host-initrd.cpio.gz
 
-.PHONY: all preflight config kernel kerf-runtime lazy-cma ring-test-module initrd build unit-test run test transport-preflight transport-test clean help FORCE
+.PHONY: all preflight config kernel kerf-runtime lazy-cma ring-test-module contract-test-module initrd build unit-test run test transport-preflight transport-test contract-test clean help FORCE
 
 all: build
 
@@ -56,6 +57,7 @@ help:
 	  'make run          - run QEMU interactively on the serial console' \
 	  'make test         - run QEMU and assert all proof markers' \
 	  'make transport-test - run the three-child transport-only restart gate' \
+	  'make contract-test - run isolated boot-contract validation modes' \
 	  'make clean        - remove only the top-level build directory'
 
 $(GUEST_BUSYBOX): $(ROOT)/scripts/prepare-guest-busybox.sh
@@ -131,16 +133,34 @@ $(RING_TEST_BUILD)/.ready: $(KERNEL) $(ROOT)/config/mk-ring-test.Kbuild \
 
 ring-test-module: $(RING_TEST_BUILD)/.ready
 
+$(CONTRACT_TEST_BUILD)/.ready: $(KERNEL) \
+		$(ROOT)/config/mk-contract-test.Kbuild \
+		$(ROOT)/modules/mk_boot_contract_test.c \
+		$(ROOT)/modules/mk_reject_contract_test.c
+	rm -rf -- '$(CONTRACT_TEST_BUILD)'
+	mkdir -p '$(CONTRACT_TEST_BUILD)'
+	install -m 0644 '$(ROOT)/config/mk-contract-test.Kbuild' \
+		'$(CONTRACT_TEST_BUILD)/Makefile'
+	install -m 0644 '$(ROOT)/modules/mk_boot_contract_test.c' \
+		'$(ROOT)/modules/mk_reject_contract_test.c' '$(CONTRACT_TEST_BUILD)/'
+	$(MAKE) -C '$(KBUILD_DIR)' M='$(CONTRACT_TEST_BUILD)' ARCH='$(KERNEL_ARCH)' \
+		CROSS_COMPILE='$(CROSS_COMPILE)' HOSTCC='$(HOSTCC)' -j'$(JOBS)' modules
+	touch '$@'
+
+contract-test-module: $(CONTRACT_TEST_BUILD)/.ready
+
 $(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-initramfs.sh \
 		$(KERF_RUNTIME)/.ready $(RING_TEST_BUILD)/.ready $(HARNESS_PYTHON_SOURCES) | preflight
 	'$(ROOT)/scripts/build-initramfs.sh' secondary '$@' '$(BUSYBOX)' '$<' \
 		'$(KERF_RUNTIME)' '$(ROOT)/harness' '$(RING_TEST_BUILD)/mk_ring_test.ko'
 
-$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(RING_TEST_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh
+$(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(RING_TEST_BUILD)/.ready $(CONTRACT_TEST_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh
 	'$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
 		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(KERNEL)' '$(SECONDARY_INITRD)' \
 		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool' \
-		'$(ROOT)/harness' '$(RING_TEST_BUILD)/mk_ring_test.ko'
+		'$(ROOT)/harness' '$(RING_TEST_BUILD)/mk_ring_test.ko' \
+		'$(CONTRACT_TEST_BUILD)/mk_boot_contract_test.ko' \
+		'$(CONTRACT_TEST_BUILD)/mk_reject_contract_test.ko'
 
 initrd: $(SECONDARY_INITRD) $(HOST_INITRD)
 
@@ -180,6 +200,19 @@ transport-test: transport-preflight unit-test
 		TRANSPORT_LINUX_DIR='$(LINUX_DIR)' TRANSPORT_FIXTURE_DIR='$(ROOT)' \
 		TRANSPORT_KERF_DIR='$(KERF_DIR)' TRANSPORT_LAZY_CMA_DIR='$(LAZY_CMA_DIR)' \
 		'$(ROOT)/scripts/run-transport-qemu.sh' test
+
+contract-test: transport-preflight unit-test
+	$(MAKE) LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' \
+		LAZY_CMA_DIR='$(LAZY_CMA_DIR)' BUILD_DIR='$(BUILD_DIR)' build
+	@set -e; for mode in boot_window bad_magic parent_mismatch parent_missing; do \
+		PYTHON='$(PYTHON)' QEMU='$(QEMU)' BUILD_DIR='$(BUILD_DIR)' \
+		QEMU_CPUS='$(QEMU_CPUS)' QEMU_MEMORY_MB='$(QEMU_MEMORY_MB)' \
+		QEMU_TIMEOUT='$(QEMU_TIMEOUT)' QEMU_IDLE_TIMEOUT='$(QEMU_IDLE_TIMEOUT)' \
+		CONTRACT_KERNEL_SHA='$(TRANSPORT_KERNEL_SHA)' \
+		CONTRACT_FIXTURE_SHA="$$(git -C '$(ROOT)' rev-parse HEAD)" \
+		CONTRACT_LINUX_DIR='$(LINUX_DIR)' CONTRACT_FIXTURE_DIR='$(ROOT)' \
+		'$(ROOT)/scripts/run-contract-qemu.sh' test "$$mode"; \
+	done
 
 clean:
 	rm -rf -- '$(BUILD_DIR)'
