@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import IO, Mapping, Sequence
 from harness.baseline import render_baseline
 from harness.events import EVENT_PREFIX, decode_event
 from harness.legacy_vmlinux import patch_legacy_multikernel_note
+from harness.raw_bzimage import load_raw_bzimage
 from harness.primary import (
     BUSYBOX,
     INSTANCES,
@@ -37,6 +39,8 @@ from harness.transport import (
 
 
 CHILDREN = (("transport-a", 1, 2), ("transport-b", 2, 3), ("transport-victim", 3, 4))
+RAW_CHILD = ("transport-raw-bzimage", 4, 5)
+ALL_CHILDREN = (*CHILDREN, RAW_CHILD)
 SURVIVORS = (1, 2)
 VICTIM = 3
 PHASE_SEQUENCES = 32
@@ -299,6 +303,76 @@ def _load_child(name: str, instance: int) -> None:
     _expect_status(name, "loaded")
 
 
+def _run_raw_bzimage_smoke(
+    kernel_sha: str,
+    fixture_sha: str,
+    expected_bzimage_sha256: str,
+    consoles: dict[int, IO[bytes]],
+    monitors: dict[int, ConsoleMonitor],
+) -> None:
+    name, instance, cpu = RAW_CHILD
+    bzimage = Path("/payload/bzImage")
+    actual_bzimage_sha256 = hashlib.sha256(bzimage.read_bytes()).hexdigest()
+    if actual_bzimage_sha256 != expected_bzimage_sha256:
+        raise ScenarioFailure("raw-bzimage-sha256-mismatch")
+
+    kerf(
+        "create",
+        name,
+        f"--id={instance}",
+        f"--cpus={cpu}",
+        "--memory=256MB",
+        stage="raw-bzimage-create",
+    )
+    _expect_status(name, "ready")
+    cmdline = (
+        "rdinit=/init quiet loglevel=6 panic=-1 "
+        f"mk_transport_test=1 mk_instance_id={instance}"
+    )
+    load_raw_bzimage(
+        bzimage,
+        Path("/payload/secondary-initrd.cpio.gz"),
+        cmdline,
+        instance,
+    )
+    _expect_status(name, "loaded")
+
+    console = _open_console(instance)
+    consoles[instance] = console
+    monitor = ConsoleMonitor(instance, console, True)
+    monitors[instance] = monitor
+    monitor.start()
+    kerf("exec", name, stage="raw-bzimage-exec")
+    _expect_status(name, "active")
+    monitor.wait_for(
+        lambda: monitor.ready_count >= 1,
+        180,
+        "raw-bzimage-ready",
+    )
+    monitor.wait_for(
+        lambda: monitor.sequence_count >= 1,
+        30,
+        "raw-bzimage-console-control",
+    )
+    emit(
+        "MK_TRANSPORT_RAW_BZIMAGE_PASS "
+        f"instance={instance} loader=kexec_file_load status=active "
+        f"ready={monitor.ready_count} sequences={monitor.sequence_count} "
+        f"kernel_sha={kernel_sha} fixture_sha={fixture_sha} "
+        f"image_sha256={actual_bzimage_sha256}"
+    )
+
+    kerf("kill", name, stage="raw-bzimage-kill")
+    _expect_status(name, "loaded")
+    monitor.close()
+    console.close()
+    del monitors[instance]
+    del consoles[instance]
+    kerf("unload", name, stage="raw-bzimage-unload")
+    _expect_status(name, "ready")
+    kerf("delete", name, stage="raw-bzimage-delete")
+
+
 def _stop_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         process.communicate()
@@ -458,15 +532,17 @@ def run() -> None:
     values = _cmdline_values(Path("/proc/cmdline").read_text())
     kernel_sha = values.get("mk_transport_kernel_sha", "")
     fixture_sha = values.get("mk_transport_fixture_sha", "")
+    bzimage_sha256 = values.get("mk_transport_bzimage_sha256", "")
     emit(
-        f"MK_TRANSPORT_EVIDENCE kernel_sha={kernel_sha} fixture_sha={fixture_sha}"
+        f"MK_TRANSPORT_EVIDENCE kernel_sha={kernel_sha} "
+        f"fixture_sha={fixture_sha} bzimage_sha256={bzimage_sha256}"
     )
 
     pool_base = _allocate_pool()
     Path("/run/transport-baseline.dts").write_text(
         render_baseline(
             pool_base,
-            cpus=tuple(cpu for _name, _instance, cpu in CHILDREN),
+            cpus=tuple(cpu for _name, _instance, cpu in ALL_CHILDREN),
             memory_bytes=0x40000000,
             resources=(),
         )
@@ -476,6 +552,13 @@ def run() -> None:
     consoles: dict[int, IO[bytes]] = {}
     monitors: dict[int, ConsoleMonitor] = {}
     try:
+        _run_raw_bzimage_smoke(
+            kernel_sha,
+            fixture_sha,
+            bzimage_sha256,
+            consoles,
+            monitors,
+        )
         for name, instance, cpu in CHILDREN:
             kerf(
                 "create",
@@ -641,7 +724,7 @@ def run() -> None:
         )
     finally:
         try:
-            for name, _instance, _cpu in reversed(CHILDREN):
+            for name, _instance, _cpu in reversed(ALL_CHILDREN):
                 path = INSTANCES / name
                 if not path.exists():
                     continue

@@ -138,7 +138,7 @@ $(SECONDARY_INITRD): $(ROOT)/initramfs/secondary-init $(ROOT)/scripts/build-init
 
 $(HOST_INITRD): $(ROOT)/initramfs/host-init $(KERF_RUNTIME)/.ready $(LAZY_CMA_BUILD)/.ready $(RING_TEST_BUILD)/.ready $(KERNEL) $(SECONDARY_KERNEL) $(SECONDARY_INITRD) $(HARNESS_PYTHON_SOURCES) $(ROOT)/scripts/build-initramfs.sh
 	'$(ROOT)/scripts/build-initramfs.sh' host '$@' '$(BUSYBOX)' '$<' \
-		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(SECONDARY_INITRD)' \
+		'$(KERF_RUNTIME)' '$(SECONDARY_KERNEL)' '$(KERNEL)' '$(SECONDARY_INITRD)' \
 		'$(LAZY_CMA_BUILD)/lazy_cma.ko' '$(LAZY_CMA_BUILD)/lazy_cma_tool' \
 		'$(ROOT)/harness' '$(RING_TEST_BUILD)/mk_ring_test.ko'
 
@@ -174,6 +174,7 @@ transport-test: transport-preflight unit-test
 		QEMU_TIMEOUT='$(QEMU_TIMEOUT)' QEMU_IDLE_TIMEOUT='$(QEMU_IDLE_TIMEOUT)' \
 		TRANSPORT_KERNEL_SHA='$(TRANSPORT_KERNEL_SHA)' \
 		TRANSPORT_FIXTURE_SHA="$$(git -C '$(ROOT)' rev-parse HEAD)" \
+		TRANSPORT_BZIMAGE_SHA256="$$(sha256sum '$(KERNEL)' | cut -d ' ' -f 1)" \
 		TRANSPORT_KERF_SHA="$$(git -C '$(ROOT)' rev-parse HEAD:kerf)" \
 		TRANSPORT_LAZY_CMA_SHA="$$(git -C '$(ROOT)' rev-parse HEAD:lazy_cma)" \
 		TRANSPORT_LINUX_DIR='$(LINUX_DIR)' TRANSPORT_FIXTURE_DIR='$(ROOT)' \

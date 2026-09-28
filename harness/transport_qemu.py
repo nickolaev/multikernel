@@ -1,12 +1,14 @@
-"""Run the transport-only three-child QEMU scenario."""
+"""Run the raw-bzImage smoke followed by the three-child transport scenario."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Mapping, Sequence
 
@@ -42,6 +44,7 @@ class TransportConfig:
     idle_timeout_seconds: int
     kernel_sha: str
     fixture_sha: str
+    bzimage_sha256: str
     kerf_sha: str
     lazy_cma_sha: str
     linux_dir: Path
@@ -63,6 +66,7 @@ class TransportConfig:
             idle_timeout_seconds=_numeric(environ, "QEMU_IDLE_TIMEOUT", 120),
             kernel_sha=environ.get("TRANSPORT_KERNEL_SHA", ""),
             fixture_sha=environ.get("TRANSPORT_FIXTURE_SHA", ""),
+            bzimage_sha256=environ.get("TRANSPORT_BZIMAGE_SHA256", ""),
             kerf_sha=environ.get("TRANSPORT_KERF_SHA", ""),
             lazy_cma_sha=environ.get("TRANSPORT_LAZY_CMA_SHA", ""),
             linux_dir=Path(environ.get("TRANSPORT_LINUX_DIR", "")),
@@ -74,8 +78,8 @@ class TransportConfig:
         return config
 
     def validate(self) -> None:
-        if self.cpus < 5:
-            raise HarnessError("transport QEMU requires at least 5 CPUs")
+        if self.cpus < 6:
+            raise HarnessError("transport QEMU requires at least 6 CPUs")
         if self.memory_mb < 2048:
             raise HarnessError("transport QEMU requires at least 2048 MiB")
         if self.timeout_seconds < 30 or self.idle_timeout_seconds < 1:
@@ -88,6 +92,8 @@ class TransportConfig:
         ):
             if not SHA_PATTERN.fullmatch(value):
                 raise HarnessError(f"{name} must be a full 40-character SHA")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.bzimage_sha256):
+            raise HarnessError("TRANSPORT_BZIMAGE_SHA256 must be a full SHA-256")
 
     def verify_sources(self) -> None:
         try:
@@ -101,6 +107,12 @@ class TransportConfig:
             )
         except SourcePinError as error:
             raise HarnessError(str(error)) from error
+        actual = hashlib.sha256(self.kernel.read_bytes()).hexdigest()
+        if actual != self.bzimage_sha256:
+            raise HarnessError(
+                "bzimage-sha256-mismatch "
+                f"expected={self.bzimage_sha256} actual={actual}"
+            )
 
     @property
     def kernel(self) -> Path:
@@ -139,7 +151,8 @@ class TransportConfig:
             "-append",
             "console=ttyS0,115200 rdinit=/init panic=-1 "
             f"mk_transport_test=1 mk_transport_kernel_sha={self.kernel_sha} "
-            f"mk_transport_fixture_sha={self.fixture_sha}",
+            f"mk_transport_fixture_sha={self.fixture_sha} "
+            f"mk_transport_bzimage_sha256={self.bzimage_sha256}",
             "-nographic",
             "-monitor",
             "none",
@@ -158,6 +171,7 @@ async def _run_async(config: TransportConfig) -> int:
         {
             "kernel_sha": config.kernel_sha,
             "fixture_sha": config.fixture_sha,
+            "bzimage_sha256": config.bzimage_sha256,
             "kerf_sha": config.kerf_sha,
             "lazy_cma_sha": config.lazy_cma_sha,
             "linux_dir": config.linux_dir,
@@ -172,6 +186,7 @@ async def _run_async(config: TransportConfig) -> int:
         {
             "kernel_sha": config.kernel_sha,
             "fixture_sha": config.fixture_sha,
+            "bzimage_sha256": config.bzimage_sha256,
             "kerf_sha": config.kerf_sha,
             "lazy_cma_sha": config.lazy_cma_sha,
             "linux_dir": config.linux_dir,
@@ -214,7 +229,11 @@ async def _run_async(config: TransportConfig) -> int:
         raise HarnessError(str(error)) from error
     _host_event(
         "MK_TRANSPORT_QEMU_PASS",
-        {"kernel_sha": config.kernel_sha, "fixture_sha": config.fixture_sha},
+        {
+            "kernel_sha": config.kernel_sha,
+            "fixture_sha": config.fixture_sha,
+            "bzimage_sha256": config.bzimage_sha256,
+        },
         host_events,
     )
     count = _write_event_log(config.event_log, host_events, serial_text)

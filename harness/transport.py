@@ -27,6 +27,7 @@ FAILURE_MARKERS = (
     *KERNEL_DIAGNOSTIC_MARKERS,
 )
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TRANSPORT_SEQUENCE_MARKER = re.compile(
     r"^MK_TRANSPORT_STREAM instance=(\d+):MK_TRANSPORT_SEQUENCE "
     r"instance=(\d+) sequence=(\d+)\r*$", re.MULTILINE
@@ -152,6 +153,30 @@ def validate_transport_log(log_text: str) -> None:
         value = str(evidence_fields.get(name, ""))
         if not SHA_PATTERN.fullmatch(value):
             raise TransportEvidenceError(f"invalid-sha field={name}")
+    if not SHA256_PATTERN.fullmatch(
+        str(evidence_fields.get("bzimage_sha256", ""))
+    ):
+        raise TransportEvidenceError("invalid-sha field=bzimage_sha256")
+
+    raw_bzimage = _one_event(events, "MK_TRANSPORT_RAW_BZIMAGE_PASS")
+    raw_fields = raw_bzimage.get("fields")
+    if not isinstance(raw_fields, dict):
+        raise TransportEvidenceError("missing-raw-bzimage-fields")
+    if (
+        event_int(raw_bzimage, "instance") != 4
+        or event_int(raw_bzimage, "ready") < 1
+        or event_int(raw_bzimage, "sequences") < 1
+        or str(raw_fields.get("loader")) != "kexec_file_load"
+        or str(raw_fields.get("status")) != "active"
+    ):
+        raise TransportEvidenceError("invalid-raw-bzimage-evidence")
+    for name in ("kernel_sha", "fixture_sha"):
+        if raw_fields.get(name) != evidence_fields.get(name):
+            raise TransportEvidenceError(f"raw-bzimage-sha-mismatch field={name}")
+    if not SHA256_PATTERN.fullmatch(str(raw_fields.get("image_sha256", ""))):
+        raise TransportEvidenceError("invalid-raw-bzimage-image-sha256")
+    if raw_fields.get("image_sha256") != evidence_fields.get("bzimage_sha256"):
+        raise TransportEvidenceError("raw-bzimage-image-sha256-mismatch")
 
     legacy_rejected = _one_event(events, "MK_TRANSPORT_LEGACY_REJECT_PASS")
     if (

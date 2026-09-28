@@ -15,6 +15,12 @@ from harness.legacy_vmlinux import (
     LegacyNoteError,
     patch_legacy_multikernel_note,
 )
+from harness.raw_bzimage import (
+    KEXEC_MULTIKERNEL,
+    SYS_KEXEC_FILE_LOAD_X86_64,
+    load_raw_bzimage,
+    kexec_mk_id,
+)
 from harness.transport import (
     FAILURE_MARKERS,
     KERNEL_DIAGNOSTIC_MARKERS,
@@ -34,16 +40,37 @@ from harness.transport_pins import SourcePin, SourcePinError, verify_source_pin
 
 KERNEL_SHA = "1" * 40
 FIXTURE_SHA = "2" * 40
+BZIMAGE_SHA256 = "a" * 64
 
 
 def complete_log(count: int = 96) -> str:
     events = [
         encode_event(
             "MK_TRANSPORT_EVIDENCE",
-            {"kernel_sha": KERNEL_SHA, "fixture_sha": FIXTURE_SHA},
+            {
+                "kernel_sha": KERNEL_SHA,
+                "fixture_sha": FIXTURE_SHA,
+                "bzimage_sha256": BZIMAGE_SHA256,
+            },
             "primary",
         )
     ]
+    events.append(
+        encode_event(
+            "MK_TRANSPORT_RAW_BZIMAGE_PASS",
+            {
+                "instance": 4,
+                "loader": "kexec_file_load",
+                "status": "active",
+                "ready": 1,
+                "sequences": 1,
+                "kernel_sha": KERNEL_SHA,
+                "fixture_sha": FIXTURE_SHA,
+                "image_sha256": BZIMAGE_SHA256,
+            },
+            "primary",
+        )
+    )
     events.append(
         encode_event(
             "MK_TRANSPORT_LEGACY_REJECT_PASS",
@@ -256,6 +283,63 @@ class TransportFixtureTests(unittest.TestCase):
         ).read_text()
         self.assertIn('${harness_package}/transport_secondary.py', script)
 
+    def test_host_initramfs_packages_raw_bzimage_separately(self) -> None:
+        script = (
+            Path(__file__).resolve().parents[1] / "scripts/build-initramfs.sh"
+        ).read_text()
+        self.assertIn('${bzimage}', script)
+        self.assertIn('${root}/payload/bzImage', script)
+        makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text()
+        self.assertIn("'$(SECONDARY_KERNEL)' '$(KERNEL)'", makefile)
+
+
+class RawBzImageLoaderTests(unittest.TestCase):
+    def test_passes_original_bzimage_fd_to_direct_syscall(self) -> None:
+        calls: list[tuple[object, ...]] = []
+        with tempfile.TemporaryDirectory() as directory:
+            kernel = Path(directory) / "bzImage"
+            initrd = Path(directory) / "initrd"
+            image = bytearray(0x206)
+            image[0x202:0x206] = b"HdrS"
+            kernel.write_bytes(image)
+            initrd.write_bytes(b"initrd")
+            original = kernel.read_bytes()
+
+            def syscall(*arguments: object) -> int:
+                calls.append(arguments)
+                self.assertEqual(os.pread(int(arguments[1]), 4, 0x202), b"HdrS")
+                self.assertEqual(os.pread(int(arguments[2]), 6, 0), b"initrd")
+                return 0
+
+            flags = load_raw_bzimage(
+                kernel,
+                initrd,
+                "rdinit=/init console=mktty0",
+                4,
+                syscall=syscall,
+            )
+            self.assertEqual(kernel.read_bytes(), original)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], SYS_KEXEC_FILE_LOAD_X86_64)
+        self.assertEqual(calls[0][3], len(b"rdinit=/init console=mktty0") + 1)
+        self.assertEqual(calls[0][5], KEXEC_MULTIKERNEL | kexec_mk_id(4))
+
+    def test_rejects_non_bzimage_without_calling_syscall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            kernel = Path(directory) / "kernel"
+            initrd = Path(directory) / "initrd"
+            kernel.write_bytes(b"not-a-bzimage")
+            initrd.write_bytes(b"initrd")
+            with self.assertRaisesRegex(Exception, "not an x86 bzImage"):
+                load_raw_bzimage(
+                    kernel,
+                    initrd,
+                    "rdinit=/init",
+                    4,
+                    syscall=mock.Mock(side_effect=AssertionError("called")),
+                )
+
     def test_ring_module_is_packaged_for_host_and_secondary(self) -> None:
         script = (
             Path(__file__).resolve().parents[1] / "scripts/build-initramfs.sh"
@@ -317,6 +401,19 @@ class TransportFixtureTests(unittest.TestCase):
 class TransportLogTests(unittest.TestCase):
     def test_accepts_sha_bound_continuous_survivor_evidence(self) -> None:
         validate_transport_log(complete_log())
+
+    def test_requires_raw_bzimage_sha_bound_readiness_evidence(self) -> None:
+        missing = complete_log().replace(
+            "MK_TRANSPORT_RAW_BZIMAGE_PASS",
+            "MK_TRANSPORT_RAW_BZIMAGE_MISSING",
+        )
+        with self.assertRaisesRegex(TransportEvidenceError, "event-count"):
+            validate_transport_log(missing)
+        mismatched = complete_log().replace(BZIMAGE_SHA256, "b" * 64, 1)
+        with self.assertRaisesRegex(
+            TransportEvidenceError, "image-sha256-mismatch"
+        ):
+            validate_transport_log(mismatched)
 
     def test_recovers_sequence_from_interleaved_text_relay(self) -> None:
         split_record = (
@@ -427,6 +524,7 @@ class TransportConfigTests(unittest.TestCase):
             {
                 "TRANSPORT_KERNEL_SHA": KERNEL_SHA,
                 "TRANSPORT_FIXTURE_SHA": FIXTURE_SHA,
+                "TRANSPORT_BZIMAGE_SHA256": BZIMAGE_SHA256,
                 "TRANSPORT_KERF_SHA": "3" * 40,
                 "TRANSPORT_LAZY_CMA_SHA": "4" * 40,
                 "TRANSPORT_LINUX_DIR": "/src/linux",
@@ -439,6 +537,7 @@ class TransportConfigTests(unittest.TestCase):
         )
         args = " ".join(config.qemu_args())
         self.assertIn("mk_transport_test=1", args)
+        self.assertIn(f"mk_transport_bzimage_sha256={BZIMAGE_SHA256}", args)
         self.assertNotIn("intel-iommu", args)
         self.assertNotIn("igb", args)
 
@@ -449,6 +548,7 @@ class TransportConfigTests(unittest.TestCase):
                 {
                     "TRANSPORT_KERNEL_SHA": "short",
                     "TRANSPORT_FIXTURE_SHA": FIXTURE_SHA,
+                    "TRANSPORT_BZIMAGE_SHA256": BZIMAGE_SHA256,
                     "TRANSPORT_KERF_SHA": "3" * 40,
                     "TRANSPORT_LAZY_CMA_SHA": "4" * 40,
                 },

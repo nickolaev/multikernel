@@ -24,19 +24,21 @@ for applet in sh mount mkdir cat grep sleep poweroff timeout sync; do
 done
 
 if [[ "${mode}" == host ]]; then
-	[[ $# -eq 11 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE RING_TEST_MODULE\n' >&2; exit 1; }
+	[[ $# -eq 12 ]] || { printf 'host mode requires KERF_RUNTIME SECONDARY_KERNEL SECONDARY_BZIMAGE SECONDARY_INITRD LAZY_CMA_MODULE LAZY_CMA_TOOL HARNESS_PACKAGE RING_TEST_MODULE\n' >&2; exit 1; }
 	kerf_runtime=$5
 	kernel=$6
-	secondary_initrd=$7
-	lazy_cma_module=$8
-	lazy_cma_tool=$9
-	harness_package=${10}
-	ring_test_module=${11}
+	bzimage=$7
+	secondary_initrd=$8
+	lazy_cma_module=$9
+	lazy_cma_tool=${10}
+	harness_package=${11}
+	ring_test_module=${12}
 	cp -a "${kerf_runtime}/." "${root}/"
 	mkdir -p "${root}/assets" "${root}/payload" "${root}/lib/modules"
 	mkdir -p "${root}/usr/lib/python3/dist-packages/harness"
 	cp -a "${harness_package}/." "${root}/usr/lib/python3/dist-packages/harness/"
 	install -m 0644 "${kernel}" "${root}/payload/vmlinux"
+	install -m 0644 "${bzimage}" "${root}/payload/bzImage"
 	install -m 0644 "${secondary_initrd}" "${root}/payload/secondary-initrd.cpio.gz"
 	install -m 0644 "${lazy_cma_module}" "${root}/lib/modules/lazy_cma.ko"
 	install -m 0644 "${ring_test_module}" "${root}/lib/modules/mk_ring_test.ko"
