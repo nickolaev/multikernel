@@ -5,8 +5,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import harness.primary as primary
 from harness.events import encode_event
+from harness.primary import parse_instance_stats
 from harness.qemu import (
     FAILURE_MARKERS,
     KERNEL_FAILURE_MARKERS,
@@ -80,25 +83,54 @@ class HarnessConfigTests(unittest.TestCase):
 class LogValidationTests(unittest.TestCase):
     @staticmethod
     def complete_log() -> str:
-        event_lines = [
-            encode_event(
-                event,
-                ({"max_cpus": 9} if event == "MK_CONCURRENT_CPU_PCI_RPC_PASS" else
-                 ({"active_instances": 3, "leases": 3}
-                  if event == "MK_COMPLEX_CONCURRENT_LEASES_PASS" else
-                  ({"cycles": 100} if event == "MK_LEASE_LIFECYCLE_STRESS_PASS" else
-                   ({"cycles": 3, "launches": 6, "halts": 6}
-                    if event == "MK_RELAUNCH_STRESS_PASS" else
-                    ({"victim": 3, "survivor": 2, "baseline_reads": 1024,
-                      "survivor_reads": 2048}
-                     if event == "MK_PEER_RESET_SURVIVOR_PASS" else
-                   ({name: 0 for name in FORBIDDEN_RELIABILITY_COUNTERS} |
-                    {"tx_before": 0, "tx_after": 1, "rx_before": 0, "rx_after": 1}
-                    if event == "MK_SECONDARY_VF_DATAPATH" else {})))))),
-                "primary",
+        event_lines = []
+        for event in REQUIRED_EVENT_NAMES:
+            if event == "MK_SECONDARY_IRQ_FORWARD_STATS":
+                for phase, instance, spawn_epoch in (
+                    ("concurrent", 3, 1),
+                    ("concurrent", 2, 1),
+                    ("peer-restart", 3, 2),
+                    ("concurrent", 1, 3),
+                    ("restart", 1, 4),
+                ):
+                    event_lines.append(
+                        encode_event(
+                            event,
+                            {
+                                "phase": phase,
+                                "instance": instance,
+                                "stats_version": 1,
+                                "transport_available": 1,
+                                "spawn_epoch": spawn_epoch,
+                                "irq.recorded": 1,
+                                "irq.dispatch_failed": 0,
+                            },
+                            "primary",
+                        )
+                    )
+                continue
+            fields = (
+                {"max_cpus": 9}
+                if event == "MK_CONCURRENT_CPU_PCI_RPC_PASS"
+                else {"active_instances": 3, "leases": 3}
+                if event == "MK_COMPLEX_CONCURRENT_LEASES_PASS"
+                else {"cycles": 100}
+                if event == "MK_LEASE_LIFECYCLE_STRESS_PASS"
+                else {"cycles": 3, "launches": 6, "halts": 6}
+                if event == "MK_RELAUNCH_STRESS_PASS"
+                else {
+                    "victim": 3,
+                    "survivor": 2,
+                    "baseline_reads": 1024,
+                    "survivor_reads": 2048,
+                }
+                if event == "MK_PEER_RESET_SURVIVOR_PASS"
+                else {name: 0 for name in FORBIDDEN_RELIABILITY_COUNTERS}
+                | {"tx_before": 0, "tx_after": 1, "rx_before": 0, "rx_after": 1}
+                if event == "MK_SECONDARY_VF_DATAPATH"
+                else {}
             )
-            for event in REQUIRED_EVENT_NAMES
-        ]
+            event_lines.append(encode_event(event, fields, "primary"))
         topology_lines = [
             "setup_percpu: NR_CPUS:12",
             "MK_STAGE_KERF_INIT_OK cpus=2,3,4,5,6,7,8,9,10,11 memory=1024M",
@@ -243,6 +275,121 @@ class LogValidationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(HarnessError, "missing-lease-lifecycle-proof"):
             validate_log(complete)
+
+    def test_rejects_missing_irq_forward_phase(self) -> None:
+        complete = self.complete_log()
+        event = next(
+            line
+            for line in complete.splitlines()
+            if '"event":"MK_SECONDARY_IRQ_FORWARD_STATS"' in line
+            and '"instance":3' in line
+        )
+        with self.assertRaisesRegex(HarnessError, "missing-irq-forward-evidence"):
+            validate_log(complete.replace(event, ""))
+
+    def test_rejects_failed_irq_dispatch(self) -> None:
+        complete = self.complete_log().replace(
+            '"irq.dispatch_failed":0', '"irq.dispatch_failed":1', 1
+        )
+        with self.assertRaisesRegex(HarnessError, "invalid-irq-forward-evidence"):
+            validate_log(complete)
+
+    def test_rejects_out_of_range_irq_counter(self) -> None:
+        complete = self.complete_log().replace(
+            '"irq.recorded":1', '"irq.recorded":4294967296', 1
+        )
+        with self.assertRaisesRegex(HarnessError, "invalid-irq-forward-evidence"):
+            validate_log(complete)
+
+    def test_rejects_late_irq_dispatch_failure(self) -> None:
+        complete = self.complete_log()
+        event = next(
+            line
+            for line in complete.splitlines()
+            if '"event":"MK_SECONDARY_IRQ_FORWARD_STATS"' in line
+            and '"phase":"peer-restart"' in line
+        )
+        failed = event.replace('"irq.dispatch_failed":0', '"irq.dispatch_failed":1')
+        with self.assertRaisesRegex(HarnessError, "invalid-irq-forward-evidence"):
+            validate_log(complete.replace(event, failed))
+
+    def test_rejects_unchanged_restart_epoch(self) -> None:
+        complete = self.complete_log()
+        event = next(
+            line
+            for line in complete.splitlines()
+            if '"event":"MK_SECONDARY_IRQ_FORWARD_STATS"' in line
+            and '"phase":"restart"' in line
+        )
+        unchanged = event.replace('"spawn_epoch":4', '"spawn_epoch":3')
+        with self.assertRaisesRegex(HarnessError, "unchanged-irq-forward-epoch"):
+            validate_log(complete.replace(event, unchanged))
+
+    def test_rejects_non_primary_irq_stats_source(self) -> None:
+        complete = self.complete_log()
+        event = next(
+            line
+            for line in complete.splitlines()
+            if '"event":"MK_SECONDARY_IRQ_FORWARD_STATS"' in line
+        )
+        secondary = event.replace('"source":"primary"', '"source":"secondary"')
+        with self.assertRaisesRegex(
+            HarnessError, "invalid-irq-forward-evidence-source"
+        ):
+            validate_log(complete.replace(event, secondary))
+
+
+class InstanceStatsParserTests(unittest.TestCase):
+    @staticmethod
+    def stats_text() -> str:
+        return "\n".join(
+            (
+                "stats_version 1",
+                "transport_available 1",
+                "spawn_epoch 7",
+                "irq.recorded 42",
+                "irq.dispatch_failed 0",
+            )
+        )
+
+    def test_parses_required_keys_and_ignores_unknown_key(self) -> None:
+        stats = parse_instance_stats(self.stats_text() + "\nfuture.counter 9\n")
+
+        self.assertEqual(stats["spawn_epoch"], 7)
+        self.assertNotIn("future.counter", stats)
+
+    def test_rejects_missing_required_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing-stats-key"):
+            parse_instance_stats(self.stats_text().replace("irq.recorded 42\n", ""))
+
+    def test_rejects_malformed_required_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid-stats-value"):
+            parse_instance_stats(
+                self.stats_text().replace("spawn_epoch 7", "spawn_epoch x")
+            )
+
+    def test_end_of_epoch_snapshot_rejects_unchanged_epoch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            instances = Path(directory)
+            stats_path = instances / "peer" / "stats"
+            stats_path.parent.mkdir()
+            stats_path.write_text(self.stats_text())
+            scenario = primary.PrimaryScenario.__new__(primary.PrimaryScenario)
+            with (
+                patch.object(primary, "INSTANCES", instances),
+                patch.object(primary, "emit") as emit_mock,
+            ):
+                epoch = scenario.require_irq_forward_stats(
+                    "peer", 3, "concurrent"
+                )
+                self.assertEqual(epoch, 7)
+                emit_mock.assert_called_once()
+                with self.assertRaisesRegex(
+                    primary.ScenarioFailure, "irq-forward-stats-peer-restart-3"
+                ):
+                    scenario.require_irq_forward_stats(
+                        "peer", 3, "peer-restart", epoch
+                    )
 
 
 class ProgressWatchdogTests(unittest.TestCase):

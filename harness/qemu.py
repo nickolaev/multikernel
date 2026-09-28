@@ -121,6 +121,7 @@ REQUIRED_EVENT_NAMES = (
     "MK_CONCURRENT_CPU_PCI_RPC_PASS",
     "MK_HALTED_IRQ_QUIESCE_PASS",
     "MK_RESTART_VF_DATAPATH_PASS",
+    "MK_SECONDARY_IRQ_FORWARD_STATS",
     "MK_COMPLEX_CONCURRENT_LEASES_PASS",
     "MK_PEER_RESET_SURVIVOR_PASS",
     "MK_LEASE_LIFECYCLE_STRESS_PASS",
@@ -414,6 +415,59 @@ def _validate_multi_child_evidence(events: Sequence[dict[str, object]]) -> None:
         raise HarnessError("missing-peer-reset-survivor-proof reads")
 
 
+def _validate_irq_forward_evidence(events: Sequence[dict[str, object]]) -> None:
+    irq_events = [
+        event
+        for event in events
+        if event.get("event") == "MK_SECONDARY_IRQ_FORWARD_STATS"
+    ]
+    expected = [
+        ("concurrent", 3),
+        ("concurrent", 2),
+        ("peer-restart", 3),
+        ("concurrent", 1),
+        ("restart", 1),
+    ]
+    if len(irq_events) != len(expected):
+        raise HarnessError("missing-irq-forward-evidence")
+
+    epochs: dict[tuple[str, int], int] = {}
+    for event, expected_identity in zip(irq_events, expected, strict=True):
+        if event.get("source") != "primary":
+            raise HarnessError("invalid-irq-forward-evidence-source")
+        fields = event.get("fields")
+        if not isinstance(fields, dict):
+            raise HarnessError("malformed-irq-forward-evidence")
+        try:
+            phase = str(fields["phase"])
+            instance = int(fields["instance"])
+            stats_version = int(fields["stats_version"])
+            transport_available = int(fields["transport_available"])
+            spawn_epoch = int(fields["spawn_epoch"])
+            irq_recorded = int(fields["irq.recorded"])
+            irq_dispatch_failed = int(fields["irq.dispatch_failed"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise HarnessError("malformed-irq-forward-evidence") from error
+        identity = (phase, instance)
+        if identity != expected_identity:
+            raise HarnessError("unexpected-irq-forward-evidence")
+        if (
+            stats_version != 1
+            or transport_available != 1
+            or not 0 < spawn_epoch <= (1 << 64) - 1
+            or not 0 < irq_recorded <= (1 << 32) - 1
+            or irq_dispatch_failed != 0
+        ):
+            raise HarnessError("invalid-irq-forward-evidence")
+        epochs[identity] = spawn_epoch
+
+    if (
+        epochs[("peer-restart", 3)] == epochs[("concurrent", 3)]
+        or epochs[("restart", 1)] == epochs[("concurrent", 1)]
+    ):
+        raise HarnessError("unchanged-irq-forward-epoch")
+
+
 def validate_log(log_text: str) -> None:
     for marker in FAILURE_MARKERS:
         if marker in log_text:
@@ -441,6 +495,7 @@ def validate_log(log_text: str) -> None:
     _validate_topology_growth_evidence(log_text, events)
     _validate_counter_evidence(events)
     _validate_multi_child_evidence(events)
+    _validate_irq_forward_evidence(events)
 
 
 class QmpClient:

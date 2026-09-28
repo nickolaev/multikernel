@@ -22,10 +22,47 @@ BUSYBOX = "/bin/busybox"
 PCI_DEVICES = Path("/sys/bus/pci/devices")
 INSTANCES = Path("/sys/fs/multikernel/instances")
 ASSIGNMENT_DRIVER = "multikernel-pci-assignment"
+IRQ_STATS_REQUIRED_KEYS = (
+    "stats_version",
+    "transport_available",
+    "spawn_epoch",
+    "irq.recorded",
+    "irq.dispatch_failed",
+)
+U32_MAX = (1 << 32) - 1
+U64_MAX = (1 << 64) - 1
 
 
 class ScenarioFailure(RuntimeError):
     """A named guest-side proof failure."""
+
+
+def parse_instance_stats(text: str) -> dict[str, int]:
+    """Parse required version-1 stats while tolerating appended keys."""
+    values: dict[str, int] = {}
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines or lines[0].split(maxsplit=1)[0] != "stats_version":
+        raise ValueError("stats-version-first")
+    for line in lines:
+        fields = line.split()
+        if len(fields) != 2:
+            raise ValueError("stats-line-format")
+        key, value = fields
+        if key not in IRQ_STATS_REQUIRED_KEYS:
+            continue
+        if key in values:
+            raise ValueError(f"duplicate-stats-key key={key}")
+        try:
+            parsed = int(value, 10)
+        except ValueError as error:
+            raise ValueError(f"invalid-stats-value key={key}") from error
+        if parsed < 0:
+            raise ValueError(f"negative-stats-value key={key}")
+        values[key] = parsed
+    missing = [key for key in IRQ_STATS_REQUIRED_KEYS if key not in values]
+    if missing:
+        raise ValueError(f"missing-stats-key key={missing[0]}")
+    return values
 
 
 def emit(message: str) -> None:
@@ -193,6 +230,43 @@ class PrimaryScenario:
             f"expected={expected} actual={actual}"
         )
         raise ScenarioFailure(f"status-{name}-{expected}")
+
+    def require_irq_forward_stats(
+        self,
+        name: str,
+        instance_id: int,
+        phase: str,
+        previous_epoch: int | None = None,
+    ) -> int:
+        try:
+            text = (INSTANCES / name / "stats").read_text()
+            stats = parse_instance_stats(text)
+        except (OSError, ValueError) as error:
+            raise ScenarioFailure(
+                f"irq-forward-stats-{phase}-{instance_id}"
+            ) from error
+        if (
+            stats["stats_version"] != 1
+            or stats["transport_available"] != 1
+            or not 0 < stats["spawn_epoch"] <= U64_MAX
+            or not 0 < stats["irq.recorded"] <= U32_MAX
+            or stats["irq.dispatch_failed"] != 0
+            or (
+                previous_epoch is not None
+                and stats["spawn_epoch"] == previous_epoch
+            )
+        ):
+            raise ScenarioFailure(f"irq-forward-stats-{phase}-{instance_id}")
+        emit(
+            "MK_SECONDARY_IRQ_FORWARD_STATS "
+            f"phase={phase} instance={instance_id} "
+            f"stats_version={stats['stats_version']} "
+            f"transport_available={stats['transport_available']} "
+            f"spawn_epoch={stats['spawn_epoch']} "
+            f"irq.recorded={stats['irq.recorded']} "
+            f"irq.dispatch_failed={stats['irq.dispatch_failed']}"
+        )
+        return stats["spawn_epoch"]
 
     @staticmethod
     def require_assigned_device(name: str, bdf: str) -> None:
@@ -669,6 +743,9 @@ class PrimaryScenario:
             except (KeyError, TypeError, ValueError) as error:
                 raise ScenarioFailure("peer-reset-survivor-baseline") from error
 
+            victim_epoch = self.require_irq_forward_stats(
+                victim_name, victim_id, "concurrent"
+            )
             kerf("kill", victim_name, stage="peer-reset-victim-kill")
             self.expect_status(victim_name, victim_id, "loaded")
             try:
@@ -764,6 +841,12 @@ class PrimaryScenario:
             )
 
         for family, name, instance_id, _cpu in cases:
+            if instance_id == victim_id:
+                self.require_irq_forward_stats(
+                    name, instance_id, "peer-restart", victim_epoch
+                )
+            else:
+                self.require_irq_forward_stats(name, instance_id, "concurrent")
             kerf("kill", name, stage=f"complex-kill-{family.name}")
             self.expect_status(name, instance_id, "loaded")
             kerf("unload", name, stage=f"complex-unload-{family.name}")
@@ -1050,6 +1133,9 @@ class PrimaryScenario:
             emit("MK_COMPLEX_INSTANCE_ACTIVE family=igb0 id=1")
             self.exercise_concurrent_cpu_config(console)
             self.run_complex_peers(console)
+            primary_epoch = self.require_irq_forward_stats(
+                "qemu-demo", 1, "concurrent"
+            )
             kerf("kill", "qemu-demo", stage="kerf-kill")
             emit("MK_STAGE_KERF_KILL_OK id=1")
             self.expect_status("qemu-demo", 1, "loaded")
@@ -1068,6 +1154,9 @@ class PrimaryScenario:
             self.expect_status("qemu-demo", 1, "active")
             self.wait_for_secondary(console)
             self.assert_vf_owner(ASSIGNMENT_DRIVER, "restart-active")
+            self.require_irq_forward_stats(
+                "qemu-demo", 1, "restart", primary_epoch
+            )
             emit(
                 f"MK_RESTART_VF_DATAPATH_PASS instance=1 vf={vf.bdf} "
                 "reset=verified traffic=verified"
