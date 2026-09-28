@@ -269,8 +269,10 @@ static void mk_ring_data_callback(struct mk_ipi_data *slot, void *context)
 }
 
 static void mk_ring_ack_callback(u32 msg_type, u32 subtype,
-				 void *payload, u32 payload_len, void *context)
+				 void *payload, u32 payload_len,
+				 s32 sender_instance_id, void *context)
 {
+	(void)sender_instance_id;
 	if (msg_type != MK_RING_TEST_TYPE_ACK)
 		return;
 	if (subtype == MK_RING_PHASE_FULL_BEGIN)
