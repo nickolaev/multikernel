@@ -32,6 +32,7 @@ TRANSPORT_SEQUENCE_MARKER = re.compile(
     r"^MK_TRANSPORT_STREAM instance=(\d+):MK_TRANSPORT_SEQUENCE "
     r"instance=(\d+) sequence=(\d+)\r*$", re.MULTILINE
 )
+TIMESTAMPED_PRINTK = re.compile(r"\[\s*\d+\.\d+\][^\n]*\n")
 MINIMUM_SURVIVOR_SEQUENCES = 96
 RACE_CYCLES = 20
 
@@ -101,8 +102,13 @@ def transport_sequence_values(
         if event_instance == instance:
             json_values.append(event_int(event, "sequence"))
 
+    # Host printk can splice a timestamped diagnostic into the middle of a
+    # relayed mktty record. Remove only those complete timestamped insertions
+    # and stitch the interrupted record back together before scanning its
+    # redundant text marker. Keep JSON parsing on the original log.
+    relay_text = TIMESTAMPED_PRINTK.sub("", log_text)
     text_values = []
-    for match in TRANSPORT_SEQUENCE_MARKER.finditer(log_text):
+    for match in TRANSPORT_SEQUENCE_MARKER.finditer(relay_text):
         relay_instance, marker_instance, sequence = map(int, match.groups())
         if relay_instance != marker_instance:
             raise TransportEvidenceError(

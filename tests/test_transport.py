@@ -448,6 +448,22 @@ class TransportLogTests(unittest.TestCase):
         replacement = replacement.rsplit("\n", 2)[0]
         validate_transport_log(log.replace(target, replacement, 1))
 
+    def test_recovers_sequence_when_printk_splits_json_and_text_markers(self) -> None:
+        split_record = (
+            "MK_TRANSPORT_STR[  247.698606] kexec-vmlinux: entry\n"
+            "EAM instance=2:M[  247.698747] kexec-vmlinux: offset\n"
+            'K_EVENT {"event":"MK_TRANSPORT_S[  247.698896] loader\n'
+            'EQUENCE","fields":{"instance":2,"sequence":6310}'
+            '[  247.699254] purgatory\n'
+            ',"source":"secondary"}\n'
+            "MK_TRANSPORT_STREAM instance=2:MK_TRANS"
+            "[  247.699698] locate hole\n"
+            "[  247.700117] allocate\n"
+            "PORT_SEQUENCE in[  247.700867] add buffer\n"
+            "stance=2 sequence=6310\n"
+        )
+        self.assertEqual(transport_sequence_values(split_record, [], 2), [6310])
+
     def test_rejects_inconsistent_text_relay_instance(self) -> None:
         log = complete_log() + (
             "MK_TRANSPORT_STREAM instance=2:MK_TRANSPORT_SEQUENCE "
