@@ -8,12 +8,20 @@ import struct
 import subprocess
 import tempfile
 
-from harness.events import encode_event, iter_events
+from harness.events import (
+    EVENT_PREFIX,
+    decode_event,
+    encode_event,
+    encode_marker,
+    iter_events,
+)
 from harness.legacy_vmlinux import (
     CURRENT_NOTE_TYPE,
     LEGACY_NOTE_TYPE,
     LegacyNoteError,
+    inspect_multikernel_vmlinux,
     patch_legacy_multikernel_note,
+    patch_multikernel_entry,
 )
 from harness.raw_bzimage import (
     KEXEC_MULTIKERNEL,
@@ -32,7 +40,11 @@ from harness.transport import (
     validate_transport_log,
 )
 from harness.primary import ScenarioFailure
-from harness.transport_primary import ConsoleMonitor, _run_gated_commands
+from harness.transport_primary import (
+    ConsoleMonitor,
+    _assert_malformed_vmlinux_rejected,
+    _run_gated_commands,
+)
 from harness.transport_secondary import _run_ring_test
 from harness.transport_qemu import TransportConfig
 from harness.transport_pins import SourcePin, SourcePinError, verify_source_pin
@@ -71,6 +83,35 @@ def complete_log(count: int = 96) -> str:
             "primary",
         )
     )
+    for case in ("zero", "below-load", "interior-gap", "outside-load"):
+        events.append(
+            encode_event(
+                "MK_TRANSPORT_ENTRY_REJECT_CASE_PASS",
+                {
+                    "instance": 1,
+                    "case": case,
+                    "attempts": 16,
+                    "pool_segment_allocations": 0,
+                    "status": "ready",
+                },
+                "primary",
+            )
+        )
+    events.append(
+        encode_event(
+            "MK_TRANSPORT_ENTRY_REJECT_PASS",
+            {
+                "instance": 1,
+                "entry_offset": 276,
+                "valid_entry": 0x034D1AF3,
+                "cases": 4,
+                "attempts": 64,
+                "pool_segment_allocations": 0,
+                "status": "ready",
+            },
+            "primary",
+        )
+    )
     events.append(
         encode_event(
             "MK_TRANSPORT_LEGACY_REJECT_PASS",
@@ -78,7 +119,7 @@ def complete_log(count: int = 96) -> str:
                 "instance": 1,
                 "note_offset": 148,
                 "attempts": 16,
-                "allocations": 0,
+                "pool_segment_allocations": 0,
                 "status": "ready",
             },
             "primary",
@@ -252,6 +293,48 @@ def _elf_with_linux_notes(note_types: tuple[int, ...]) -> bytes:
     return bytes(image)
 
 
+def _elf_with_loads_and_note(entry: int = 0x034D1AF3) -> bytes:
+    image = bytearray(1024)
+    image[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<Q", image, 32, 64)
+    struct.pack_into("<H", image, 54, 56)
+    struct.pack_into("<H", image, 56, 3)
+
+    struct.pack_into(
+        "<IIQQQQQQ",
+        image,
+        64,
+        1,
+        5,
+        0,
+        0,
+        0x01000000,
+        0x01BB11E8,
+        0x01BB11E8,
+        0x200000,
+    )
+    struct.pack_into(
+        "<IIQQQQQQ",
+        image,
+        120,
+        1,
+        6,
+        0,
+        0,
+        0x02C00000,
+        0x0B88000,
+        0x0C50000,
+        0x200000,
+    )
+    struct.pack_into(
+        "<IIQQQQQQ", image, 176, 4, 4, 256, 0, 0, 28, 28, 4
+    )
+    struct.pack_into("<III", image, 256, 6, 8, CURRENT_NOTE_TYPE)
+    image[268:274] = b"Linux\0"
+    struct.pack_into("<Q", image, 276, entry)
+    return bytes(image)
+
+
 class LegacyVmlinuxTests(unittest.TestCase):
     def test_patches_exactly_one_current_note(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -264,6 +347,95 @@ class LegacyVmlinuxTests(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<I", patched, offset)[0], LEGACY_NOTE_TYPE)
         self.assertEqual(original[:offset], patched[:offset])
         self.assertEqual(original[offset + 4 :], patched[offset + 4 :])
+
+    def test_inspects_valid_entry_and_patches_malformed_entries(self) -> None:
+        load_ranges_expected = (
+            (0x01000000, 0x01BB11E8),
+            (0x02C00000, 0x0B88000),
+        )
+        invalid_entries = (
+            0,
+            load_ranges_expected[0][0] - 1,
+            sum(load_ranges_expected[0]),
+            sum(load_ranges_expected[1]),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "vmlinux"
+            destination = Path(directory) / "vmlinux-malformed"
+            original = _elf_with_loads_and_note()
+            source.write_bytes(original)
+            entry, load_ranges = inspect_multikernel_vmlinux(source)
+            self.assertEqual(entry, 0x034D1AF3)
+            self.assertEqual(load_ranges, load_ranges_expected)
+            self.assertTrue(entry >= load_ranges_expected[1][0])
+            self.assertLess(
+                entry - load_ranges_expected[1][0],
+                load_ranges_expected[1][1],
+            )
+            for invalid_entry in invalid_entries:
+                with self.subTest(entry=invalid_entry):
+                    offset = patch_multikernel_entry(
+                        source, destination, invalid_entry
+                    )
+                    patched = destination.read_bytes()
+                    self.assertEqual(offset, 276)
+                    self.assertEqual(
+                        struct.unpack_from("<Q", patched, offset)[0],
+                        invalid_entry,
+                    )
+                    self.assertEqual(original[:offset], patched[:offset])
+                    self.assertEqual(
+                        original[offset + 8 :], patched[offset + 8 :]
+                    )
+
+    def test_producer_marker_passes_transport_validation(self) -> None:
+        emitted: list[str] = []
+        load_ranges = (
+            (0x01000000, 0x01BB11E8),
+            (0x02C00000, 0x0B88000),
+        )
+        with (
+            mock.patch(
+                "harness.transport_primary.inspect_multikernel_vmlinux",
+                return_value=(0x034D1AF3, load_ranges),
+            ),
+            mock.patch(
+                "harness.transport_primary.patch_multikernel_entry",
+                return_value=276,
+            ),
+            mock.patch(
+                "harness.transport_primary.patch_legacy_multikernel_note",
+                return_value=264,
+            ),
+            mock.patch(
+                "harness.transport_primary._assert_vmlinux_load_rejected"
+            ) as reject,
+            mock.patch(
+                "harness.transport_primary.emit", side_effect=emitted.append
+            ),
+        ):
+            _assert_malformed_vmlinux_rejected("transport-a", 1)
+
+        self.assertEqual(reject.call_count, 80)
+        entry_summary = next(
+            marker
+            for marker in emitted
+            if marker.startswith("MK_TRANSPORT_ENTRY_REJECT_PASS ")
+        )
+        self.assertIn("cases=4", entry_summary)
+        producer_names = {marker.split()[0] for marker in emitted}
+        log_lines = []
+        for line in complete_log().splitlines():
+            if EVENT_PREFIX in line:
+                event = decode_event(line)
+                if str(event["event"]) in producer_names:
+                    continue
+            log_lines.append(line)
+        producer_events = [
+            str(encode_marker(marker, "primary")) for marker in emitted
+        ]
+        self.assertNotIn("None", producer_events)
+        validate_transport_log("\n".join((*log_lines, *producer_events)))
 
     def test_rejects_missing_or_ambiguous_current_note(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -291,6 +463,13 @@ class TransportFixtureTests(unittest.TestCase):
         self.assertIn('${root}/payload/bzImage', script)
         makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text()
         self.assertIn("'$(SECONDARY_KERNEL)' '$(KERNEL)'", makefile)
+        self.assertIn("PR7_LINUX_DIR ?=", makefile)
+        self.assertIn("PR7_LINUX_DIR is required", makefile)
+        self.assertIn(
+            "override TRANSPORT_KERNEL_SHA := "
+            "a7a784e3d11c7bfa8cee88c37a802bcd72fd58e9",
+            makefile,
+        )
 
 
 class RawBzImageLoaderTests(unittest.TestCase):
@@ -601,6 +780,36 @@ class SourcePinTests(unittest.TestCase):
         self.assertEqual(
             verify_source_pin(SourcePin("linux", self.path, self.sha)), self.sha
         )
+
+    def test_wraps_git_execution_and_timeout_errors(self) -> None:
+        errors = (
+            OSError("git unavailable"),
+            subprocess.TimeoutExpired(["git"], 30),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with mock.patch(
+                    "harness.transport_pins.subprocess.run",
+                    side_effect=error,
+                ):
+                    with self.assertRaisesRegex(
+                        SourcePinError, "git-execution-failed"
+                    ):
+                        verify_source_pin(SourcePin("linux", self.path, self.sha))
+
+    def test_transport_preflight_requires_explicit_pr7_checkout(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["make", "-s", "transport-preflight", "PR7_LINUX_DIR="],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=30,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PR7_LINUX_DIR is required", result.stdout)
 
     def test_rejects_sha_mismatch_dirty_tree_and_relative_path(self) -> None:
         cases = (

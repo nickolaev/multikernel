@@ -184,11 +184,46 @@ def validate_transport_log(log_text: str) -> None:
     if raw_fields.get("image_sha256") != evidence_fields.get("bzimage_sha256"):
         raise TransportEvidenceError("raw-bzimage-image-sha256-mismatch")
 
+    entry_cases = [
+        event
+        for event in events
+        if event.get("event") == "MK_TRANSPORT_ENTRY_REJECT_CASE_PASS"
+    ]
+    expected_cases = ("zero", "below-load", "interior-gap", "outside-load")
+    if len(entry_cases) != len(expected_cases):
+        raise TransportEvidenceError(
+            f"entry-rejection-case-count count={len(entry_cases)}"
+        )
+    for event, expected_case in zip(entry_cases, expected_cases):
+        fields = event.get("fields")
+        if (
+            not isinstance(fields, dict)
+            or str(fields.get("case")) != expected_case
+            or event_int(event, "instance") != 1
+            or event_int(event, "attempts") != 16
+            or event_int(event, "pool_segment_allocations") != 0
+            or str(fields.get("status")) != "ready"
+        ):
+            raise TransportEvidenceError(
+                f"invalid-entry-rejection-case case={expected_case}"
+            )
+
+    entry_rejected = _one_event(events, "MK_TRANSPORT_ENTRY_REJECT_PASS")
+    if (
+        event_int(entry_rejected, "instance") != 1
+        or event_int(entry_rejected, "cases") != 4
+        or event_int(entry_rejected, "attempts") != 64
+        or event_int(entry_rejected, "pool_segment_allocations") != 0
+        or event_int(entry_rejected, "valid_entry") <= 0
+        or str(entry_rejected.get("fields", {}).get("status")) != "ready"
+    ):
+        raise TransportEvidenceError("invalid-entry-rejection-evidence")
+
     legacy_rejected = _one_event(events, "MK_TRANSPORT_LEGACY_REJECT_PASS")
     if (
         event_int(legacy_rejected, "instance") != 1
         or event_int(legacy_rejected, "attempts") != 16
-        or event_int(legacy_rejected, "allocations") != 0
+        or event_int(legacy_rejected, "pool_segment_allocations") != 0
         or str(legacy_rejected.get("fields", {}).get("status")) != "ready"
     ):
         raise TransportEvidenceError("invalid-legacy-rejection-evidence")

@@ -16,7 +16,11 @@ from typing import IO, Mapping, Sequence
 
 from harness.baseline import render_baseline
 from harness.events import EVENT_PREFIX, decode_event
-from harness.legacy_vmlinux import patch_legacy_multikernel_note
+from harness.legacy_vmlinux import (
+    inspect_multikernel_vmlinux,
+    patch_legacy_multikernel_note,
+    patch_multikernel_entry,
+)
 from harness.raw_bzimage import load_raw_bzimage
 from harness.primary import (
     BUSYBOX,
@@ -248,45 +252,115 @@ def _allocate_pool() -> str:
     return base
 
 
-def _assert_legacy_vmlinux_rejected(name: str, instance: int) -> None:
+def _assert_malformed_vmlinux_rejected(name: str, instance: int) -> None:
     attempts = 16
-    legacy_kernel = Path("/run/vmlinux-legacy-note")
-    note_offset = patch_legacy_multikernel_note(
-        Path("/payload/vmlinux"), legacy_kernel
+    source = Path("/payload/vmlinux")
+    valid_entry, load_ranges = inspect_multikernel_vmlinux(source)
+    if not load_ranges or not any(
+        valid_entry >= base and valid_entry - base < size
+        for base, size in load_ranges
+    ):
+        raise ScenarioFailure("valid-vmlinux-entry-outside-loads")
+
+    lowest_load = min(base for base, _size in load_ranges)
+    if lowest_load == 0:
+        raise ScenarioFailure("vmlinux-has-no-below-load-address")
+    ordered_loads = sorted(load_ranges)
+    interior_gaps = tuple(
+        base + size
+        for (base, size), (next_base, _next_size) in zip(
+            ordered_loads, ordered_loads[1:]
+        )
+        if base + size < next_base
     )
+    if not interior_gaps:
+        raise ScenarioFailure("vmlinux-has-no-interior-load-gap")
+    invalid_entries = (
+        ("zero", 0),
+        ("below-load", lowest_load - 1),
+        ("interior-gap", interior_gaps[0]),
+        ("outside-load", max(base + size for base, size in load_ranges)),
+    )
+
+    entry_offset = -1
+    kernel = Path("/run/vmlinux-rejected-note")
+    for case, entry in invalid_entries:
+        entry_offset = patch_multikernel_entry(source, kernel, entry)
+        for attempt in range(1, attempts + 1):
+            _assert_vmlinux_load_rejected(
+                name,
+                instance,
+                kernel,
+                case,
+                attempt,
+                "Exec format error",
+            )
+        emit(
+            f"MK_TRANSPORT_ENTRY_REJECT_CASE_PASS instance={instance} "
+            f"case={case} attempts={attempts} "
+            f"pool_segment_allocations=0 status=ready"
+        )
+
+    note_offset = patch_legacy_multikernel_note(source, kernel)
     for attempt in range(1, attempts + 1):
-        dmesg_before = dmesg()
-        result = kerf(
-            "load",
+        _assert_vmlinux_load_rejected(
             name,
-            f"--kernel={legacy_kernel}",
-            "--initrd=/payload/secondary-initrd.cpio.gz",
-            f"--cmdline=rdinit=/init quiet loglevel=6 panic=-1 "
-            f"mk_transport_test=1 mk_instance_id={instance}",
-            "--console=mktty0",
-            stage=f"legacy-vmlinux-load-{attempt}",
-            check=False,
-            capture=True,
+            instance,
+            kernel,
+            "legacy",
+            attempt,
+            "Protocol not supported",
         )
-        if result.returncode == 0 or "Protocol not supported" not in result.stdout:
-            raise ScenarioFailure(f"legacy-vmlinux-not-rejected-{attempt}")
-        dmesg_after = dmesg()
-        dmesg_delta = (
-            dmesg_after[len(dmesg_before) :]
-            if dmesg_after.startswith(dmesg_before)
-            else dmesg_after
-        )
-        if re.search(
-            r"kexec_file: Allocated \d+ bytes from multikernel pool",
-            dmesg_delta,
-        ):
-            raise ScenarioFailure(f"legacy-vmlinux-allocated-segment-{attempt}")
-        _expect_status(name, "ready")
+
+    emit(
+        f"MK_TRANSPORT_ENTRY_REJECT_PASS instance={instance} "
+        f"entry_offset={entry_offset} valid_entry={valid_entry} "
+        f"cases={len(invalid_entries)} "
+        f"attempts={attempts * len(invalid_entries)} "
+        f"pool_segment_allocations=0 status=ready"
+    )
     emit(
         f"MK_TRANSPORT_LEGACY_REJECT_PASS instance={instance} "
         f"note_offset={note_offset} attempts={attempts} "
-        f"allocations=0 status=ready"
+        f"pool_segment_allocations=0 status=ready"
     )
+
+
+def _assert_vmlinux_load_rejected(
+    name: str,
+    instance: int,
+    kernel: Path,
+    case: str,
+    attempt: int,
+    expected_error: str,
+) -> None:
+    dmesg_before = dmesg()
+    result = kerf(
+        "load",
+        name,
+        f"--kernel={kernel}",
+        "--initrd=/payload/secondary-initrd.cpio.gz",
+        f"--cmdline=rdinit=/init quiet loglevel=6 panic=-1 "
+        f"mk_transport_test=1 mk_instance_id={instance}",
+        "--console=mktty0",
+        stage=f"{case}-vmlinux-load-{attempt}",
+        check=False,
+        capture=True,
+    )
+    if result.returncode == 0 or expected_error not in result.stdout:
+        raise ScenarioFailure(f"{case}-vmlinux-not-rejected-{attempt}")
+    dmesg_after = dmesg()
+    dmesg_delta = (
+        dmesg_after[len(dmesg_before) :]
+        if dmesg_after.startswith(dmesg_before)
+        else dmesg_after
+    )
+    if re.search(
+        r"kexec_file: Allocated \d+ bytes from multikernel pool",
+        dmesg_delta,
+    ):
+        raise ScenarioFailure(f"{case}-vmlinux-allocated-segment-{attempt}")
+    _expect_status(name, "ready")
 
 
 def _load_child(name: str, instance: int) -> None:
@@ -570,7 +644,7 @@ def run() -> None:
             )
             _expect_status(name, "ready")
             if instance == 1:
-                _assert_legacy_vmlinux_rejected(name, instance)
+                _assert_malformed_vmlinux_rejected(name, instance)
                 _load_ring_test_host()
             _load_child(name, instance)
             console = _open_console(instance)

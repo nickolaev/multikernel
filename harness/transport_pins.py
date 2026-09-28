@@ -25,14 +25,19 @@ class SourcePin:
 
 
 def _git(path: Path, *arguments: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(path), *arguments],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SourcePinError(
+            f"git-execution-failed source={path} operation={arguments[0]}"
+        ) from error
     if result.returncode:
         raise SourcePinError(f"git-failed source={path} operation={arguments[0]}")
     return result.stdout.strip()

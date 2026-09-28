@@ -2,6 +2,7 @@ SHELL := /bin/bash
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 LINUX_DIR ?= $(ROOT)/linux
+PR7_LINUX_DIR ?=
 KERF_DIR ?= $(ROOT)/kerf
 LAZY_CMA_DIR ?= $(ROOT)/lazy_cma
 BUILD_DIR ?= $(ROOT)/build
@@ -31,7 +32,7 @@ QEMU_CPUS ?= 12
 QEMU_MEMORY_MB ?= 8192
 QEMU_TIMEOUT ?= 2400
 QEMU_IDLE_TIMEOUT ?= 120
-override TRANSPORT_KERNEL_SHA := be70d51dec2bc493c8a5914d28f16afe0e93edcc
+override TRANSPORT_KERNEL_SHA := a7a784e3d11c7bfa8cee88c37a802bcd72fd58e9
 LEX := $(shell command -v flex 2>/dev/null)
 YACC := $(shell command -v bison 2>/dev/null)
 
@@ -56,8 +57,8 @@ help:
 	  'make unit-test    - run the Python harness unit tests' \
 	  'make run          - run QEMU interactively on the serial console' \
 	  'make test         - run QEMU and assert all proof markers' \
-	  'make transport-test - run the three-child transport-only restart gate' \
-	  'make contract-test - run isolated boot-contract validation modes' \
+	  'make transport-test - run the three-child transport-only restart gate (requires PR7_LINUX_DIR)' \
+	  'make contract-test - run isolated boot-contract validation modes (requires PR7_LINUX_DIR)' \
 	  'make clean        - remove only the top-level build directory'
 
 $(GUEST_BUSYBOX): $(ROOT)/scripts/prepare-guest-busybox.sh
@@ -180,14 +181,18 @@ test: unit-test build
 		QEMU_IDLE_TIMEOUT='$(QEMU_IDLE_TIMEOUT)' '$(ROOT)/scripts/run-qemu.sh' test
 
 transport-preflight:
+	@test -n '$(PR7_LINUX_DIR)' || { \
+		printf '%s\n' 'PR7_LINUX_DIR is required; set it to the absolute PR7 Linux checkout' >&2; \
+		exit 2; \
+	}
 	'$(PYTHON)' -m harness.transport_pins \
 		--fixture-dir '$(ROOT)' --fixture-sha "$$(git -C '$(ROOT)' rev-parse HEAD)" \
-		--linux-dir '$(LINUX_DIR)' --linux-sha '$(TRANSPORT_KERNEL_SHA)' \
+		--linux-dir '$(PR7_LINUX_DIR)' --linux-sha '$(TRANSPORT_KERNEL_SHA)' \
 		--kerf-dir '$(KERF_DIR)' --kerf-sha "$$(git -C '$(ROOT)' rev-parse HEAD:kerf)" \
 		--lazy-cma-dir '$(LAZY_CMA_DIR)' --lazy-cma-sha "$$(git -C '$(ROOT)' rev-parse HEAD:lazy_cma)"
 
 transport-test: transport-preflight unit-test
-	$(MAKE) LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' \
+	$(MAKE) LINUX_DIR='$(PR7_LINUX_DIR)' KERF_DIR='$(KERF_DIR)' \
 		LAZY_CMA_DIR='$(LAZY_CMA_DIR)' BUILD_DIR='$(BUILD_DIR)' build
 	PYTHON='$(PYTHON)' QEMU='$(QEMU)' BUILD_DIR='$(BUILD_DIR)' \
 		QEMU_CPUS='$(QEMU_CPUS)' QEMU_MEMORY_MB='$(QEMU_MEMORY_MB)' \
@@ -197,12 +202,12 @@ transport-test: transport-preflight unit-test
 		TRANSPORT_BZIMAGE_SHA256="$$(sha256sum '$(KERNEL)' | cut -d ' ' -f 1)" \
 		TRANSPORT_KERF_SHA="$$(git -C '$(ROOT)' rev-parse HEAD:kerf)" \
 		TRANSPORT_LAZY_CMA_SHA="$$(git -C '$(ROOT)' rev-parse HEAD:lazy_cma)" \
-		TRANSPORT_LINUX_DIR='$(LINUX_DIR)' TRANSPORT_FIXTURE_DIR='$(ROOT)' \
+		TRANSPORT_LINUX_DIR='$(PR7_LINUX_DIR)' TRANSPORT_FIXTURE_DIR='$(ROOT)' \
 		TRANSPORT_KERF_DIR='$(KERF_DIR)' TRANSPORT_LAZY_CMA_DIR='$(LAZY_CMA_DIR)' \
 		'$(ROOT)/scripts/run-transport-qemu.sh' test
 
 contract-test: transport-preflight unit-test
-	$(MAKE) LINUX_DIR='$(LINUX_DIR)' KERF_DIR='$(KERF_DIR)' \
+	$(MAKE) LINUX_DIR='$(PR7_LINUX_DIR)' KERF_DIR='$(KERF_DIR)' \
 		LAZY_CMA_DIR='$(LAZY_CMA_DIR)' BUILD_DIR='$(BUILD_DIR)' build
 	@set -e; for mode in boot_window bad_magic parent_mismatch parent_missing; do \
 		PYTHON='$(PYTHON)' QEMU='$(QEMU)' BUILD_DIR='$(BUILD_DIR)' \
@@ -210,7 +215,7 @@ contract-test: transport-preflight unit-test
 		QEMU_TIMEOUT='$(QEMU_TIMEOUT)' QEMU_IDLE_TIMEOUT='$(QEMU_IDLE_TIMEOUT)' \
 		CONTRACT_KERNEL_SHA='$(TRANSPORT_KERNEL_SHA)' \
 		CONTRACT_FIXTURE_SHA="$$(git -C '$(ROOT)' rev-parse HEAD)" \
-		CONTRACT_LINUX_DIR='$(LINUX_DIR)' CONTRACT_FIXTURE_DIR='$(ROOT)' \
+		CONTRACT_LINUX_DIR='$(PR7_LINUX_DIR)' CONTRACT_FIXTURE_DIR='$(ROOT)' \
 		'$(ROOT)/scripts/run-contract-qemu.sh' test "$$mode"; \
 	done
 

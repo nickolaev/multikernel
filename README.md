@@ -89,7 +89,13 @@ Common overrides:
 ```sh
 make build JOBS=12
 make test QEMU_TIMEOUT=240 QEMU_IDLE_TIMEOUT=120
+make PR7_LINUX_DIR=/absolute/path/to/linux transport-test
+make PR7_LINUX_DIR=/absolute/path/to/linux contract-test
 ```
+
+The transport and contract gates require an explicit absolute
+PR7_LINUX_DIR so their immutable PR7 SHA check cannot accidentally use the
+downstream PR4 submodule or a machine-specific checkout.
 
 The defaults are QEMU TCG, twelve CPUs, 8192 MiB of RAM, a 2400-second total
 timeout, and a 120-second structured-progress idle timeout. The harness
@@ -111,6 +117,8 @@ instances receive CPUs 2, 3, and 4 and 256 MiB each while they are active.
 | `make build` | Build all required artifacts. |
 | `make run` | Boot QEMU with an interactive serial console. |
 | `make test` | Boot QEMU and validate the complete proof sequence. |
+| `make PR7_LINUX_DIR=/abs/path transport-test` | Run the SHA-pinned PR7 transport gate. |
+| `make PR7_LINUX_DIR=/abs/path contract-test` | Run the four SHA-pinned PR7 contract modes. |
 | `make clean` | Remove only the top-level `build/` directory. |
 
 Important artifacts:
